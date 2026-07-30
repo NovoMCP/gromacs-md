@@ -1,0 +1,48 @@
+; NPT equilibration stage 2 — restrained protein only (lipids released)
+; Step 4 of 6 — lipids equilibrate around the restrained protein
+
+integrator              = md
+dt                      = 0.002
+nsteps                  = 2500000    ; 5 ns
+nstxout-compressed      = 5000
+nstenergy               = 1000
+nstlog                  = 1000
+
+; Temperature coupling
+tcoupl                  = V-rescale
+tc-grps                 = Protein POPC Water_and_ions
+tau_t                   = 0.1 0.1 0.1
+ref_t                   = {temperature} {temperature} {temperature}
+
+; Pressure — semi-isotropic, switch to Parrinello-Rahman for better sampling
+pcoupl                  = Parrinello-Rahman
+pcoupltype              = semiisotropic
+tau_p                   = 5.0
+ref_p                   = 1.0 1.0
+compressibility         = 4.5e-5 4.5e-5
+
+; Electrostatics + VdW
+coulombtype             = PME
+rcoulomb                = 1.2
+fourierspacing          = 0.12
+vdwtype                 = Cut-off
+vdw-modifier            = force-switch
+rvdw-switch             = 1.0
+rvdw                    = 1.2
+DispCorr                = no
+
+; Neighbor searching
+nstlist                 = 20
+cutoff-scheme           = Verlet
+pbc                     = xyz
+
+; Constraints
+constraints             = h-bonds
+constraint_algorithm    = LINCS
+lincs_iter              = 1
+lincs_order             = 4
+
+gen-vel                 = no
+
+; Protein restrained, lipids FREE
+define                  = -DPOSRES

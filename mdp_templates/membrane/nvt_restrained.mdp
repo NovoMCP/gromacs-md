@@ -1,0 +1,51 @@
+; NVT equilibration with heavy restraints on protein + lipid headgroups
+; CHARMM36m membrane system
+; Step 2 of 6 — heat to target temperature with restrained protein + lipids
+
+integrator              = md
+dt                      = 0.001      ; 1 fs (short timestep for initial equilibration)
+nsteps                  = 500000     ; 500 ps
+nstxout-compressed      = 5000
+nstenergy               = 1000
+nstlog                  = 1000
+
+; Temperature coupling — separate groups for protein, lipids, solvent+ions
+tcoupl                  = V-rescale
+tc-grps                 = Protein POPC Water_and_ions
+tau_t                   = 0.1 0.1 0.1
+ref_t                   = {temperature} {temperature} {temperature}
+
+; No pressure coupling during NVT
+pcoupl                  = no
+
+; Neighbor searching
+nstlist                 = 20
+cutoff-scheme           = Verlet
+pbc                     = xyz
+
+; Electrostatics — CHARMM
+coulombtype             = PME
+rcoulomb                = 1.2
+fourierspacing          = 0.12
+
+; Van der Waals — CHARMM force-switch
+vdwtype                 = Cut-off
+vdw-modifier            = force-switch
+rvdw-switch             = 1.0
+rvdw                    = 1.2
+DispCorr                = no
+
+; Constraints
+constraints             = h-bonds
+constraint_algorithm    = LINCS
+lincs_iter              = 1
+lincs_order             = 4
+
+; Velocity generation
+gen-vel                 = yes
+gen-temp                = {temperature}
+gen-seed                = -1
+
+; Position restraints — heavy atoms of protein + lipid headgroups
+; These reference the posre.itp files generated during topology setup
+define                  = -DPOSRES -DPOSRES_LIP

@@ -21,9 +21,18 @@ jobs:
       - name: Test
         run: pytest -q
 
-  # The container compiles GROMACS (CUDA) + AmberTools from source (~20 min) and
-  # is meant to run on a GPU host. It's a manual job rather than per-push so the
-  # heavy build only runs when you ask for it.
+  # The container compiles GROMACS (CUDA) + AmberTools from source and is meant to
+  # run on a GPU host. It's a manual job rather than per-push so the heavy build
+  # only runs when you ask for it.
+  #
+  # Build cache: BuildKit stores all layers in a registry-backed cache at a
+  # dedicated :buildcache tag in GHCR (cache-to mode=max). GitHub runners are
+  # ephemeral, so without this every run recompiles GROMACS + AmberTools from
+  # scratch (~60-90 min). The FIRST run after enabling this still takes the full
+  # time (it populates the cache); subsequent runs reuse the unchanged compile
+  # layers and finish in ~15 min — only code-copy layers rebuild. Editing the
+  # Dockerfile above the code COPY (base image, GROMACS/AmberTools install)
+  # invalidates the cache and triggers a full rebuild.
   image:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -32,15 +41,20 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Lowercase image name
-        run: echo "IMG=ghcr.io/${GITHUB_REPOSITORY,,}:latest" >> "$GITHUB_ENV"
+      - name: Lowercase image + cache refs
+        run: |
+          echo "IMG=ghcr.io/${GITHUB_REPOSITORY,,}:latest" >> "$GITHUB_ENV"
+          echo "CACHE=ghcr.io/${GITHUB_REPOSITORY,,}:buildcache" >> "$GITHUB_ENV"
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: ${{ env.IMG }}
+          cache-from: type=registry,ref=${{ env.CACHE }}
+          cache-to: type=registry,ref=${{ env.CACHE }},mode=max

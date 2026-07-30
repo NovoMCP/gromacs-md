@@ -1,0 +1,32 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtualenvs
+.venv/
+venv/
+env/
+ENV/
+
+# Prototype local caches (API responses, downloaded PDBs)
+.cache/
+planning/hard-systems/prototypes/.cache/
+
+# Distribution / build
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Test / coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/

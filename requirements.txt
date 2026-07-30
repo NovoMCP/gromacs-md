@@ -1,0 +1,28 @@
+fastapi==0.104.1
+uvicorn==0.24.0
+pydantic==2.5.2
+python-multipart==0.0.6
+httpx==0.25.2
+tenacity==8.2.3
+redis[hiredis]==5.0.1
+# S3 for results + checkpoint resume (novomcp-md-data/gromacs-md, /md-checkpoints)
+boto3>=1.34.0
+numpy==1.24.3
+rdkit==2023.9.1
+openbabel-wheel==3.1.1.22
+acpype==2022.7.21
+# Intake classifier (doc 01 / doc 07). MDAnalysis has C-extensions, pin strictly.
+MDAnalysis==2.7.0
+biopython==1.83
+PyYAML==6.0.1
+# Membrane branch (doc 11): AMBER→CHARMM topology conversion for
+# packmol-memgen output. Also used by QM→FF bridge (doc 12) for
+# MCPB.py output → GROMACS format.
+ParmEd==4.2.2
+# Structural repair for soluble proteins with missing sidechain atoms.
+# OpenMM ships the C-extension; pdbfixer is pure Python on top.
+# Pinned to the tested pair (2026-04-05 smoke test) — bumping openmm
+# without bumping pdbfixer (and vice versa) can break the ForceField
+# lookup chain.
+openmm==8.5.0
+pdbfixer==1.12.0

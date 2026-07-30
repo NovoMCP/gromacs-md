@@ -1,0 +1,37 @@
+# Reference Job template for running a single MD simulation to completion.
+#
+# The engine's Kubernetes job runner reads this template, deep-copies it, and
+# fills in the per-job pieces (job name, MD_JOB_ID / MD_CONFIG, or leaves them
+# unset so run_md_job.py consumes the `novomcp:gromacs:job_queue` dispatch
+# queue). Everything below the marked line is constant. Adjust image, GPU
+# scheduling, and redis/S3 env for your cluster.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gromacs-md-job   # the runner overrides this per job
+  labels: { app: gromacs-md, role: md-job }
+spec:
+  backoffLimit: 3        # retries; run_md_job.py resumes from checkpoint
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels: { app: gromacs-md, role: md-job }
+    spec:
+      restartPolicy: Never
+      # tolerations:
+      #   - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+      containers:
+        - name: gromacs-md-job
+          image: ghcr.io/novomcp/gromacs-md:latest
+          command: ["python3", "run_md_job.py"]
+          # ─── the runner fills in per-job env above this line ───
+          env:
+            # Job tracking + checkpoint persistence (recommended for Jobs so a
+            # retried pod can resume). Point at your own Redis / S3:
+            - { name: REDIS_URL, value: "redis://redis:6379/0" }
+            - { name: MD_RESULTS_BUCKET, value: "your-md-results-bucket" }
+            - { name: AWS_REGION, value: "us-east-1" }
+            - { name: NTOMP, value: "8" }
+          resources:
+            limits: { nvidia.com/gpu: "1" }
+            requests: { cpu: "4", memory: "8Gi" }

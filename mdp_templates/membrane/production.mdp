@@ -1,0 +1,51 @@
+; Production MD — unrestrained membrane system
+; CHARMM36m protein + CHARMM36 lipids + TIP3P-CHARMM water
+; Step 6 of 6
+
+integrator              = md
+dt                      = 0.002
+nsteps                  = {nsteps}   ; filled by pipeline from simulation_ns
+nstxout-compressed      = 5000       ; ~every 10 ps
+nstenergy               = 5000
+nstlog                  = 5000
+
+; Temperature coupling
+tcoupl                  = V-rescale
+tc-grps                 = Protein POPC Water_and_ions
+tau_t                   = 0.1 0.1 0.1
+ref_t                   = {temperature} {temperature} {temperature}
+
+; Pressure — semi-isotropic Parrinello-Rahman (production barostat)
+pcoupl                  = Parrinello-Rahman
+pcoupltype              = semiisotropic
+tau_p                   = 5.0
+ref_p                   = 1.0 1.0
+compressibility         = 4.5e-5 4.5e-5
+
+; Electrostatics
+coulombtype             = PME
+rcoulomb                = 1.2
+fourierspacing          = 0.12
+
+; Van der Waals — CHARMM force-switch
+vdwtype                 = Cut-off
+vdw-modifier            = force-switch
+rvdw-switch             = 1.0
+rvdw                    = 1.2
+DispCorr                = no
+
+; Neighbor searching
+nstlist                 = 20
+cutoff-scheme           = Verlet
+pbc                     = xyz
+
+; Constraints
+constraints             = h-bonds
+constraint_algorithm    = LINCS
+lincs_iter              = 1
+lincs_order             = 4
+
+; No velocity generation (continued from eq3)
+gen-vel                 = no
+
+; No position restraints — fully unrestrained production

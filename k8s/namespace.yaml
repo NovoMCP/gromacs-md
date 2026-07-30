@@ -1,0 +1,8 @@
+# Optional namespace. Rename to whatever your cluster uses, or drop this file
+# and deploy into an existing namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: novomcp
+  labels:
+    app.kubernetes.io/part-of: novomcp

@@ -1,0 +1,29 @@
+; Membrane system energy minimization
+; CHARMM36m protein + CHARMM36 lipids
+; Step 1 of 6 in the membrane equilibration protocol (doc 11)
+
+integrator              = steep
+emtol                   = 1000.0
+emstep                  = 0.01
+nsteps                  = 50000
+
+; Neighbor searching
+nstlist                 = 20
+cutoff-scheme           = Verlet
+ns_type                 = grid
+pbc                     = xyz
+
+; Electrostatics — CHARMM recommendation
+coulombtype             = PME
+rcoulomb                = 1.2
+fourierspacing          = 0.12
+
+; Van der Waals — CHARMM force-switch
+vdwtype                 = Cut-off
+vdw-modifier            = force-switch
+rvdw-switch             = 1.0
+rvdw                    = 1.2
+DispCorr                = no
+
+; No constraints during EM
+constraints             = none

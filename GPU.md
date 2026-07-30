@@ -21,17 +21,28 @@ You don't need a cluster — any single CUDA GPU host works:
   images, Lambda Cloud, RunPod. Confirm `nvidia-smi` works.
 - **Your own workstation** with an NVIDIA GPU + the NVIDIA Container Toolkit.
 
-## Build & run
+## Run
+
+The quickest path is to **pull the prebuilt image** — no build required:
 
 ```bash
 # On the GPU host:
+docker run --gpus all -p 8024:8024 ghcr.io/novomcp/gromacs-md:latest
+```
+
+**Or build from source** (to customize the GROMACS / force-field setup):
+
+```bash
 docker build -t gromacs-md .
 docker run --gpus all -p 8024:8024 gromacs-md
 ```
 
-The build compiles GROMACS 2023.3 from source and installs AmberTools (via
+The from-source build compiles GROMACS 2023.3 and installs AmberTools (via
 micromamba) for ligand parameterization — **~15–20 min** the first time. Layer
 caching makes code-only rebuilds fast.
+
+Either way, first boot downloads/warms the force fields — allow a moment before
+the first request; `/health` reports readiness.
 
 ## Verify the GPU is seen
 

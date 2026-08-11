@@ -30,18 +30,18 @@ Job IDs are `gro_{compound_id}_{timestamp}`; progress is tracked in Redis (`novo
 
 This is a **GPU service** — GROMACS is compiled with CUDA. You need an NVIDIA GPU and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). See [`GPU.md`](./GPU.md) for driver/hardware details and options for getting a GPU.
 
-**Pull the prebuilt image** (fastest — skips the ~20 min build):
-
-```bash
-docker run --gpus all -p 8024:8024 ghcr.io/novomcp/gromacs-md:latest
-curl -s localhost:8024/health
-```
-
-**Or build from source** (e.g. to customize the GROMACS/force-field setup):
+**Build from source** — the recommended path; no dependency on a prebuilt image:
 
 ```bash
 docker build -t gromacs-md .
 docker run --gpus all -p 8024:8024 gromacs-md
+curl -s localhost:8024/health
+```
+
+**Or pull the prebuilt image** (faster — skips the ~20 min build):
+
+```bash
+docker run --gpus all -p 8024:8024 ghcr.io/novomcp/gromacs-md:latest
 ```
 
 The from-source build compiles GROMACS 2023.3 and installs AmberTools via micromamba (~15–20 min); subsequent builds reuse cached layers.

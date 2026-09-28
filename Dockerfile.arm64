@@ -1,0 +1,134 @@
+# GROMACS-MD — arm64 / NVIDIA GB10 (Grace Blackwell, sm_121) build.
+#
+# Separate from the amd64 `Dockerfile` (which stays on cuda:11.8 + GROMACS 2023.3
+# for existing x86 GPU hosts — no base/driver regression). This variant targets
+# DGX Spark. Core VERIFIED on a live GB10 (2026-09-28): GROMACS 2026.3 builds
+# with CUDA 13 + sm_121 + ARM SIMD and runs a GPU MD (nonbonded + PME + update
+# on the GPU). The AmberTools/gmx_MMPBSA stack below is drafted from conda-forge
+# linux-aarch64 availability and is VALIDATED ON THE SPARK before merge.
+#
+# Two key deltas the CUDA-13 port requires (both learned on the box):
+#   - GROMACS 2026.x, NOT 2023.3 — the 2025.2/2023.3 line fails to LINK its
+#     PME-GPU kernels against CUDA 13 ("undefined reference to pme_solve_kernel").
+#   - GMX_SIMD=ARM_NEON_ASIMD, NOT AVX2_256 (x86-only).
+# And never GMX_DOUBLE=ON: GB10 FP64 is ~34x slower than FP32 (measured).
+FROM nvidia/cuda:13.0.1-devel-ubuntu24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=$CUDA_HOME/bin:$PATH
+ENV LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    git \
+    wget \
+    python3 \
+    python3-pip \
+    libfftw3-dev \
+    libopenmpi-dev \
+    openmpi-bin \
+    libboost-all-dev \
+    gfortran \
+    libnetcdf-dev \
+    libnetcdff-dev \
+    libxrender1 \
+    libgomp1 \
+    libxext6 \
+    liblapack3 \
+    libblas3 \
+    curl \
+    openbabel \
+    && rm -rf /var/lib/apt/lists/*
+
+# AmberTools via micromamba (antechamber/sqm/parmchk2/tleap for ACPYPE GAFF2,
+# and MCPB.py for metal parameterization). conda-forge has linux-aarch64 builds
+# of ambertools 26 (verified available 2026-09-28); the amd64 image uses the
+# linux-64 channel + ambertools 23.
+ENV MAMBA_ROOT_PREFIX=/opt/micromamba
+RUN for i in 1 2 3 4 5; do \
+        curl -fsSL -o /tmp/micromamba.tar.bz2 https://micro.mamba.pm/api/micromamba/linux-aarch64/latest && \
+        tar -xvjf /tmp/micromamba.tar.bz2 -C /usr/local bin/micromamba && \
+        rm /tmp/micromamba.tar.bz2 && break; \
+        echo "Attempt $i failed, retrying in 10s..."; sleep 10; \
+    done && \
+    /usr/local/bin/micromamba create -n amber -c conda-forge python=3.12 ambertools=26 -y && \
+    /usr/local/bin/micromamba clean -afy
+
+# GROMACS 2026.3 with GPU support, targeting sm_121 + ARM NEON SIMD.
+WORKDIR /opt
+RUN wget https://ftp.gromacs.org/gromacs/gromacs-2026.3.tar.gz && \
+    tar xfz gromacs-2026.3.tar.gz && \
+    cd gromacs-2026.3 && \
+    mkdir build && cd build && \
+    cmake .. \
+        -DGMX_BUILD_OWN_FFTW=ON \
+        -DGMX_GPU=CUDA \
+        -DGMX_CUDA_TARGET_SM=121 \
+        -DCUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda \
+        -DGMX_SIMD=ARM_NEON_ASIMD \
+        -DGMX_MPI=OFF \
+        -DGMX_OPENMP=ON \
+        -DCMAKE_INSTALL_PREFIX=/usr/local/gromacs && \
+    make -j"$(nproc)" && \
+    make install && \
+    cd / && \
+    rm -rf /opt/gromacs-2026.3*
+
+ENV PATH=/usr/local/gromacs/bin:$PATH
+ENV LD_LIBRARY_PATH=/usr/local/gromacs/lib64:$LD_LIBRARY_PATH
+
+COPY requirements.txt /tmp/requirements.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r /tmp/requirements.txt
+
+# gmx_MMPBSA into the AmberTools env (conda-forge). aarch64 availability is the
+# one piece to confirm at Spark-validation; if unavailable, MM/GBSA falls back
+# to the AmberTools MMPBSA.py directly.
+RUN /usr/local/bin/micromamba install -n amber -c conda-forge gmx_mmpbsa -y && \
+    /usr/local/bin/micromamba clean -afy && \
+    ln -sf /opt/micromamba/envs/amber/bin/gmx_MMPBSA /usr/local/bin/gmx_MMPBSA || \
+    echo "WARN: gmx_MMPBSA not installed on aarch64 — MMPBSA.py fallback"
+
+# Symlink AmberTools binaries + data (tleap derives AMBERHOME from its own path).
+ENV AMBERHOME=/opt/micromamba/envs/amber
+RUN for bin in antechamber sqm parmchk2 tleap teLeap atomtype bondtype am1bcc \
+             packmol-memgen MCPB.py \
+             cpptraj cpptraj.OMP sander sander.MPI ambpdb rdparm resp; do \
+        [ -f /opt/micromamba/envs/amber/bin/$bin ] && \
+            ln -sf /opt/micromamba/envs/amber/bin/$bin /usr/local/bin/; \
+    done && \
+    ln -sf /opt/micromamba/envs/amber/dat /usr/local/dat && \
+    ln -sf /opt/micromamba/envs/amber/lib /usr/local/lib/amber
+
+# CHARMM36m force field (architecture-independent download).
+RUN GROMACS_TOP=/usr/local/gromacs/share/gromacs/top && \
+    cd /tmp && \
+    for i in 1 2 3 4 5; do \
+        wget --timeout=60 --tries=3 -q \
+             "http://mackerell.umaryland.edu/download.php?filename=CHARMM_ff_params_files/charmm36-jul2022.ff.tgz" \
+             -O charmm36.ff.tgz && \
+        [ -s charmm36.ff.tgz ] && break; \
+        echo "CHARMM36m download attempt $i/5 failed, retrying in 30s..."; \
+        rm -f charmm36.ff.tgz; sleep 30; \
+    done && \
+    [ -s /tmp/charmm36.ff.tgz ] && \
+    tar xzf charmm36.ff.tgz -C "$GROMACS_TOP" && \
+    rm charmm36.ff.tgz && \
+    echo "CHARMM36m installed at $GROMACS_TOP/charmm36-jul2022.ff/"
+
+WORKDIR /app
+COPY main.py .
+COPY run_md_job.py .
+COPY gromacs_md/ ./gromacs_md/
+COPY intake/ ./intake/
+COPY scripts/ ./scripts/
+COPY mdp_templates/ ./mdp_templates/
+
+ENV PORT=8024
+ENV PYTHONUNBUFFERED=1
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8024/health || exit 1
+
+CMD ["python3", "main.py"]

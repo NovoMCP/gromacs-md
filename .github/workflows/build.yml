@@ -51,9 +51,15 @@ jobs:
         run: |
           echo "IMG=ghcr.io/${GITHUB_REPOSITORY,,}:latest" >> "$GITHUB_ENV"
           echo "CACHE=ghcr.io/${GITHUB_REPOSITORY,,}:buildcache" >> "$GITHUB_ENV"
+      # CI runners are amd64 and can't compile the arm64 GPU path (the default
+      # Dockerfile; Dockerfile.arm64 builds on a GB10), so the published :latest
+      # is amd64-only — pin the platform explicitly. The arm64 (GB10/Spark)
+      # image is built on a DGX Spark and published to the :spark tag
+      # out-of-band; this workflow must never publish :spark.
       - uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: linux/amd64
           push: true
           tags: ${{ env.IMG }}
           cache-from: type=registry,ref=${{ env.CACHE }}

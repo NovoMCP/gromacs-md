@@ -12,7 +12,7 @@
 #     PME-GPU kernels against CUDA 13 ("undefined reference to pme_solve_kernel").
 #   - GMX_SIMD=ARM_NEON_ASIMD, NOT AVX2_256 (x86-only).
 # And never GMX_DOUBLE=ON: GB10 FP64 is ~34x slower than FP32 (measured).
-FROM nvidia/cuda:13.0.1-devel-ubuntu24.04
+FROM nvidia/cuda:13.0.1-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV CUDA_HOME=/usr/local/cuda
@@ -54,10 +54,11 @@ RUN for i in 1 2 3 4 5; do \
         echo "Attempt $i failed, retrying in 10s..."; sleep 10; \
     done && \
     /usr/local/bin/micromamba create -n amber -c conda-forge python=3.12 ambertools=26 -y && \
-    /usr/local/bin/micromamba clean -afy
+    /usr/local/bin/micromamba clean -afy || true
 
 # GROMACS 2026.3 with GPU support, targeting sm_121 + ARM NEON SIMD.
 WORKDIR /opt
+RUN pip3 install --no-cache-dir cmake
 RUN wget https://ftp.gromacs.org/gromacs/gromacs-2026.3.tar.gz && \
     tar xfz gromacs-2026.3.tar.gz && \
     cd gromacs-2026.3 && \
@@ -80,13 +81,13 @@ ENV PATH=/usr/local/gromacs/bin:$PATH
 ENV LD_LIBRARY_PATH=/usr/local/gromacs/lib64:$LD_LIBRARY_PATH
 
 COPY requirements.txt /tmp/requirements.txt
-RUN pip3 install --no-cache-dir --break-system-packages -r /tmp/requirements.txt
+RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
 
 # gmx_MMPBSA into the AmberTools env (conda-forge). aarch64 availability is the
 # one piece to confirm at Spark-validation; if unavailable, MM/GBSA falls back
 # to the AmberTools MMPBSA.py directly.
 RUN /usr/local/bin/micromamba install -n amber -c conda-forge gmx_mmpbsa -y && \
-    /usr/local/bin/micromamba clean -afy && \
+    /usr/local/bin/micromamba clean -afy || true && \
     ln -sf /opt/micromamba/envs/amber/bin/gmx_MMPBSA /usr/local/bin/gmx_MMPBSA || \
     echo "WARN: gmx_MMPBSA not installed on aarch64 — MMPBSA.py fallback"
 

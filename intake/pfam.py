@@ -58,7 +58,9 @@ def lookup_role(pfam: Optional[str]) -> Optional[FunctionalRole]:
     Lookup priority:
       1. Normalized direct hit
       2. Suffix trim (e.g. "Peptidase_M10A" -> "Peptidase_M10")
-      3. Substring fallback on normalized keys
+      3. Prefix fallback: the longest known key (4+ chars) the family starts
+         with, so subtypes like "Peptidase_M10A" match "peptidase_m10" but
+         unrelated families like "GAF" or "RasGEF" don't match "ga" / "ras"
     """
     if not pfam:
         return None
@@ -76,10 +78,10 @@ def lookup_role(pfam: Optional[str]) -> Optional[FunctionalRole]:
         if base_norm in _TABLE:
             return _TABLE[base_norm]
 
-    # 3. Substring fallback on normalized keys
-    for known_key, role in _TABLE.items():
-        if known_key in key or key in known_key:
-            return role
+    # 3. Prefix fallback on normalized keys
+    prefixes = [k for k in _TABLE if len(k) >= 4 and key.startswith(k)]
+    if prefixes:
+        return _TABLE[max(prefixes, key=len)]
     return None
 
 

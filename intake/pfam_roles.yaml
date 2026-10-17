@@ -14,8 +14,8 @@
 #
 # Matching (see intake.pfam.lookup_role) is case-insensitive and ignores
 # underscores/hyphens, so "EF_hand", "EF-hand", "efhand" all resolve to
-# the same entry. Suffix stripping and substring fallback handle family
-# subtypes (e.g. "Peptidase_M10A" matches "peptidase_m10").
+# the same entry. Suffix stripping and a prefix fallback (keys of 4+ chars)
+# handle family subtypes (e.g. "Peptidase_M10A" matches "peptidase_m10").
 #
 # Add new entries here without a code deploy — the file is loaded at
 # service startup. Format is a flat dict at the top level.
@@ -37,6 +37,10 @@ ef_hand_5: structural
 ef_hand_6: structural
 ef_hand_7: structural
 efhand_ca_insen: structural
+
+# --- Structural Ca in non-metal enzymes (catalysis doesn't use the metal) ---
+trypsin: structural         # S1 serine proteases: Ca loop, far from the Ser-His-Asp triad (3PTB)
+peptidase_s8: structural    # subtilisins: stabilizing Ca sites
 
 # --- Catalytic Zn (hydrolases, lyases, isomerases) ---
 carb_anhydrase: catalytic   # carbonic anhydrase

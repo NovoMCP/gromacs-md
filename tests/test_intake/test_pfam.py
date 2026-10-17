@@ -42,3 +42,19 @@ def test_lookup_case_insensitive():
 
 def test_table_loaded():
     assert table_size() > 0
+
+
+def test_lookup_trypsin_calcium_is_structural():
+    # trypsin's Ca loop is far from the catalytic triad; not a QM/MM case
+    assert lookup_role("Trypsin") == "structural"
+
+
+def test_lookup_family_subtype_by_prefix():
+    assert lookup_role("Peptidase_M10A") == "catalytic"
+    assert lookup_role("EF_hand_3") == "structural"
+
+
+@pytest.mark.parametrize("family", ["GAF", "PAS", "RasGEF", "ArfGap", "Gag_p24", "C2"])
+def test_short_keys_do_not_match_unrelated_families(family):
+    # "ga", "ras", "arf" are table keys; "pas" and "c2" sit inside longer ones
+    assert lookup_role(family) is None

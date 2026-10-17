@@ -2,12 +2,14 @@
 
 import json
 import logging
+import os
+import signal
 import subprocess
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional, Set
 
-from .config import MDRUN_CPU_FALLBACK, MDRUN_CPU_NTOMP, MDRUN_GPU_RETRIES
+from .config import MDRUN_CPU_FALLBACK, MDRUN_CPU_NTOMP, MDRUN_GPU_RETRIES, NTOMP
 
 logger = logging.getLogger(__name__)
 
@@ -20,12 +22,79 @@ RETRY_FILE = "_mdrun_retries.json"
 _GPU_TASK_OPTS = ("-nb", "-pme", "-pmefft", "-bonded", "-update")
 _GPU_DEVICE_OPTS = ("-gpu_id", "-gputasks")
 
+# Simulations running now, set by main at startup from the GPU semaphore.
+active_simulations: Callable[[], int] = lambda: 1
+
+# Workspaces of cancelled jobs: their processes are killed and not retried.
+_cancelled: Set[str] = set()
+
+
+class JobCancelled(Exception):
+    """The job was cancelled while one of its commands ran."""
+
+
+def cancel_workspace(workspace) -> int:
+    """Mark a job's workspace cancelled and kill every process running in it.
+
+    Matching on the working directory, plus those processes' descendants,
+    covers whatever the job is running: mdrun, ACPYPE and the sqm it starts
+    in a temp dir, gmx_MMPBSA. Returns the number of processes killed.
+    """
+    ws = os.path.realpath(str(workspace))
+    _cancelled.add(ws)
+    parent: dict = {}
+    targets = set()
+    for pid in map(int, filter(str.isdigit, os.listdir("/proc"))):
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                parent[pid] = int(f.read().rsplit(")", 1)[1].split()[1])
+            cwd = os.path.realpath(os.readlink(f"/proc/{pid}/cwd"))
+        except (OSError, IndexError, ValueError):
+            continue
+        if pid != os.getpid() and (cwd == ws or cwd.startswith(ws + os.sep)):
+            targets.add(pid)
+    # and their descendants: ACPYPE runs sqm in a temp dir outside the workspace
+    grew = True
+    while grew:
+        children = {p for p, pp in parent.items() if pp in targets and p != os.getpid()}
+        grew = not children <= targets
+        targets |= children
+    killed = 0
+    for pid in targets:
+        try:
+            os.kill(pid, signal.SIGKILL)
+            killed += 1
+        except OSError:
+            pass
+    return killed
+
+
+def is_cancelled(workspace) -> bool:
+    return os.path.realpath(str(workspace)) in _cancelled
+
+
+def forget_cancelled(workspace):
+    _cancelled.discard(os.path.realpath(str(workspace)))
+
+
+def cpu_rerun_threads() -> int:
+    """OpenMP threads for a CPU rerun: MDRUN_CPU_NTOMP, or the cores the other
+    running simulations leave free (at least NTOMP)."""
+    if MDRUN_CPU_NTOMP:
+        return MDRUN_CPU_NTOMP
+    others = max(0, active_simulations() - 1)
+    return max(NTOMP, (os.cpu_count() or NTOMP) - NTOMP * others)
+
 
 def _run(args, workspace, input_data=None):
+    if is_cancelled(workspace):
+        raise JobCancelled(str(workspace))
     result = subprocess.run(
         args, input=input_data, cwd=workspace,
         capture_output=True, text=(input_data is None),
     )
+    if result.returncode != 0 and is_cancelled(workspace):
+        raise JobCancelled(str(workspace))
     if result.returncode != 0:
         stderr = result.stderr if isinstance(result.stderr, str) else result.stderr.decode(errors="replace")
         logger.error(f"Command failed: {' '.join(str(a) for a in args)}\nstderr: {stderr}")
@@ -80,7 +149,7 @@ def without_nsteps(args) -> List[str]:
 
 def mdrun_cpu_args(args, workspace, failed_run_started: float) -> List[str]:
     """The CPU rerun of a failed GPU mdrun: every GPU task option becomes "cpu",
-    device options are dropped and the thread count becomes MDRUN_CPU_NTOMP."""
+    device options are dropped and the thread count becomes cpu_rerun_threads()."""
     out: List[str] = []
     i = 0
     while i < len(args):
@@ -93,7 +162,7 @@ def mdrun_cpu_args(args, workspace, failed_run_started: float) -> List[str]:
             i += 2
             continue
         if a == "-ntomp" and i + 1 < len(args):
-            out += [a, str(MDRUN_CPU_NTOMP)]
+            out += [a, str(cpu_rerun_threads())]
             i += 2
             continue
         out.append(a)

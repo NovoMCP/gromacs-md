@@ -27,6 +27,7 @@ from gromacs_md.config import (
 )
 from gromacs_md.state import AppState
 from gromacs_md.system_info import check_gpu_available, get_gromacs_version
+from gromacs_md import subprocess_utils
 from gromacs_md.routes import register_routes
 
 # ---------------------------------------------------------------------------
@@ -65,6 +66,8 @@ register_routes(app)
 async def startup():
     state = AppState()
     state.gpu_sem = asyncio.Semaphore(MAX_CONCURRENT_SIMS)
+    # The CPU rerun of a failed GPU stage sizes its threads by what's running
+    subprocess_utils.active_simulations = lambda: MAX_CONCURRENT_SIMS - state.gpu_sem._value
 
     # Redis
     try:

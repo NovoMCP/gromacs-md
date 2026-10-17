@@ -16,10 +16,11 @@ from intake import classify_structure
 
 from .config import NTOMP
 from .state import AppState
-from .redis_jobs import update_job_status, complete_job, fail_job, refuse_job, keep_alive
+from .redis_jobs import update_job_status, complete_job, fail_job, refuse_job, keep_alive, is_job_cancelled
 from .s3_storage import upload_results_to_blob
-from .subprocess_utils import run_subprocess, load_mdrun_retries, without_nsteps
+from .subprocess_utils import run_subprocess, load_mdrun_retries, without_nsteps, is_cancelled, forget_cancelled
 from .ligand_input import LigandInputError, prepare_ligand_smiles
+from .queue import record_min_per_ns, system_kind
 from .placement import native_ligand_site, place_ligand, save_placement, load_placement
 from .pdb_handling import (
     clean_pdb_protein_only,
@@ -254,6 +255,9 @@ async def _run_membrane_pipeline(
 
     async with state.gpu_sem:
         logger.info(f"Job {job_id}: Acquired GPU semaphore (membrane branch)")
+        if await is_job_cancelled(state, job_id):
+            logger.info(f"Job {job_id}: cancelled while queued")
+            return
 
         try:
             with tempfile.TemporaryDirectory() as workspace_str:
@@ -482,9 +486,28 @@ def production_ns_done(md_log: Path) -> Optional[float]:
     return None
 
 
+def production_ns_per_day(md_log: Path) -> Optional[float]:
+    """mdrun's own throughput, from the Performance line it writes on exit."""
+    try:
+        with open(md_log, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 8192))
+            lines = f.read().decode(errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        if line.startswith("Performance:"):
+            try:
+                return float(line.split()[1])
+            except (IndexError, ValueError):
+                return None
+    return None
+
+
 async def _production_progress(
     state: AppState, job_id: str, md_log: Path, simulation_ns: float, interval: float = 60.0,
     clock: Callable[[], float] = time.monotonic,
+    kind: str = "protein",
 ):
     """Report production progress (67-90%) from the mdrun log until cancelled.
 
@@ -511,6 +534,7 @@ async def _production_progress(
             ns_per_min = (done - first[1]) / ((now - first[0]) / 60)
             progress["production_remaining_minutes"] = round(max(simulation_ns - done, 0) / ns_per_min)
             progress["ns_per_day"] = round(ns_per_min * 1440, 1)
+            await record_min_per_ns(state, kind, ns_per_min * 1440)
         await update_job_status(state, job_id, "processing", progress)
 
 
@@ -678,6 +702,9 @@ async def _run_simulation_pipeline(
 
     async with state.gpu_sem:
         logger.info(f"Job {job_id}: Acquired GPU semaphore, starting simulation")
+        if await is_job_cancelled(state, job_id):
+            logger.info(f"Job {job_id}: cancelled while queued")
+            return
 
         # Resolve workspace: explicit resume_workdir or fresh mkdtemp.
         # Persistent across the function call (NOT a context manager) so the
@@ -699,6 +726,7 @@ async def _run_simulation_pipeline(
                 prefix=f"md_{job_id}_",
             )
             workspace = Path(workspace_str)
+        state.job_workspaces[job_id] = workspace
 
         clean_workspace_on_success = True
         gro_file: Optional[Path] = None
@@ -1104,6 +1132,7 @@ async def _run_simulation_pipeline(
 
                 progress_task = asyncio.create_task(_production_progress(
                     state, job_id, workspace / f"{compound_id}_md.log", simulation_ns,
+                    kind=system_kind(bool(pdb_content)),
                 ))
                 try:
                     await loop.run_in_executor(None, run_subprocess, mdrun_cmd, workspace)
@@ -1115,6 +1144,11 @@ async def _run_simulation_pipeline(
                                 await task
                             except (asyncio.CancelledError, Exception):
                                 pass
+
+                # this host's measured rate, for later runtime estimates
+                ns_per_day = production_ns_per_day(workspace / f"{compound_id}_md.log")
+                if ns_per_day:
+                    await record_min_per_ns(state, system_kind(bool(pdb_content)), ns_per_day)
 
                 _finalize_stage(workspace, "production", [f"{compound_id}_md.*"])
                 if checkpoint_callback:
@@ -1207,6 +1241,13 @@ async def _run_simulation_pipeline(
             logger.error(f"Job {job_id} failed: {e}", exc_info=True)
             await fail_job(state, job_id, str(e))
             clean_workspace_on_success = False
+
+        state.job_workspaces.pop(job_id, None)
+        if is_cancelled(workspace):
+            # nothing to resume: a cancelled job's workspace goes too
+            clean_workspace_on_success = True
+            forget_cancelled(workspace)
+            logger.info(f"Job {job_id}: cancelled")
 
         # Cleanup ONLY on success. Failure path leaves the workspace in place
         # so a same-container retry (legacy FastAPI path) can resume from

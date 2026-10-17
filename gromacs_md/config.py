@@ -25,7 +25,19 @@ AUTODOCK_GPU_API_KEY = os.environ.get("AUTODOCK_GPU_API_KEY", "")
 # threads. Set MDRUN_CPU_FALLBACK=0 to fail the job instead of the CPU rerun.
 MDRUN_GPU_RETRIES = int(os.environ.get("MDRUN_GPU_RETRIES", "2"))
 MDRUN_CPU_FALLBACK = os.environ.get("MDRUN_CPU_FALLBACK", "1") != "0"
-MDRUN_CPU_NTOMP = int(os.environ.get("MDRUN_CPU_NTOMP", str(os.cpu_count() or NTOMP)))
+# Unset, the CPU rerun takes the cores the other running simulations aren't
+# using (NTOMP each), and at least NTOMP: all 19 on an idle GB10.
+MDRUN_CPU_NTOMP = int(os.environ["MDRUN_CPU_NTOMP"]) if os.environ.get("MDRUN_CPU_NTOMP") else None
+
+# OpenMP threads for ACPYPE's sqm (AM1-BCC charges). sqm doesn't speed up with
+# threads (imatinib on the GB10: 87 s on 1, 84 s on 4, 92 s on 19), and with
+# all cores it starved the mdrun of concurrent jobs.
+ACPYPE_OMP_THREADS = int(os.environ.get("ACPYPE_OMP_THREADS", "1"))
+
+# Runtime estimate before production: minutes per simulated ns. Once a
+# production run has been measured on this host, the last measured rate is
+# used instead. The default is calibrated on an A100.
+MD_MIN_PER_NS = float(os.environ.get("MD_MIN_PER_NS", "3"))
 
 # A running job's heartbeat is written every JOB_HEARTBEAT_SECONDS. A job
 # whose heartbeat is older than JOB_STALE_SECONDS lost its worker (the

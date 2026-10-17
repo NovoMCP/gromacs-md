@@ -1,10 +1,14 @@
 """GROMACS topology generation and MDP file writers."""
 
 import logging
+import os
 import subprocess
 import shutil
 from pathlib import Path
 from typing import List
+
+from .config import ACPYPE_OMP_THREADS
+from .subprocess_utils import JobCancelled, is_cancelled
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +86,10 @@ def generate_ligand_topology(workspace: Path, compound_id: str, ligand_pdb: Path
         ["acpype", "-i", str(ligand_mol2), "-b", acpype_base, "-c", "bcc", "-a", "gaff2",
          "-n", str(net_charge)],
         capture_output=True, cwd=workspace,
+        env={**os.environ, "OMP_NUM_THREADS": str(ACPYPE_OMP_THREADS)},
     )
+    if result.returncode != 0 and is_cancelled(workspace):
+        raise JobCancelled(str(workspace))
     if result.returncode != 0:
         # ACPYPE reports its errors on stdout
         out = b"\n".join(x for x in (result.stdout, result.stderr) if x).decode(errors="replace")

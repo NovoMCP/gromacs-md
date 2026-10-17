@@ -18,7 +18,7 @@ def test_cpu_args_move_every_task_off_the_gpu(tmp_path):
     assert out[out.index("-pme") + 1] == "cpu"
     assert out[out.index("-update") + 1] == "cpu"
     assert "-gpu_id" not in out
-    assert out[out.index("-ntomp") + 1] == str(su.MDRUN_CPU_NTOMP)
+    assert out[out.index("-ntomp") + 1] == str(su.cpu_rerun_threads())
     assert "-cpi" not in out
 
 

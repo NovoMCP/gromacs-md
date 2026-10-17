@@ -1,7 +1,8 @@
 """Shared application state — initialized on startup, passed explicitly."""
 
-from dataclasses import dataclass
-from typing import Any, Optional
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 import asyncio
 import redis.asyncio as aioredis
@@ -16,6 +17,8 @@ class AppState:
     # run_md_job.py call sites.
     blob: Optional[Any] = None
     gpu_sem: Optional[asyncio.Semaphore] = None
+    # Running jobs' workspaces, so /cancel can stop what they're running
+    job_workspaces: Dict[str, Path] = field(default_factory=dict)
 
 
 def get_state(request: Request) -> AppState:

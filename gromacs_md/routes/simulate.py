@@ -12,8 +12,9 @@ from ..state import AppState, get_state
 from ..auth import validate_api_key
 from ..models import MDSimulationRequest, LigandPreparationRequest, BatchMDRequest
 from ..ligand_input import LigandInputError, prepare_ligand_smiles
+from ..analysis import _KNOWN_INTENTS as KNOWN_INTENTS
 from ..pdb_handling import fetch_pdb_from_rcsb
-from ..queue import estimate_runtime_minutes, get_gpu_queue_info
+from ..queue import estimate_runtime_minutes, get_gpu_queue_info, measured_min_per_ns, system_kind
 from ..redis_jobs import update_job_status
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,8 @@ async def _simulate_with_fetch(
     simulation_ns: float,
     temperature: float,
     pressure: float,
+    intent: Optional[str] = None,
+    adaptive_equilibration: bool = False,
 ):
     """Fetch PDB (if needed) and dispatch to the simulation pipeline.
 
@@ -62,6 +65,8 @@ async def _simulate_with_fetch(
             temperature=temperature,
             pressure=pressure,
             pdb_id=pdb_id,
+            intent=intent,
+            adaptive_equilibration=adaptive_equilibration,
         )
     except Exception as e:
         logger.error(f"Job {job_id} failed during fetch/prep: {e}")
@@ -87,6 +92,9 @@ async def submit_simulation(request: MDSimulationRequest, state: AppState = Depe
     if not request.pdb_id and not request.pdb_content and not request.ligand_smiles:
         raise HTTPException(status_code=400, detail="Either pdb_id/pdb_content or ligand_smiles must be provided")
 
+    if request.intent is not None and request.intent not in KNOWN_INTENTS:
+        raise HTTPException(status_code=400, detail=f"intent must be one of {sorted(KNOWN_INTENTS)}")
+
     if request.ligand_smiles:
         try:
             prepare_ligand_smiles(request.ligand_smiles)
@@ -101,6 +109,7 @@ async def submit_simulation(request: MDSimulationRequest, state: AppState = Depe
         has_protein=has_protein,
         has_ligand=has_ligand,
         concurrent_jobs=gpu_info["active_jobs"],
+        measured_min_per_ns=await measured_min_per_ns(state, system_kind(has_protein)),
     )
 
     # Initialize job in Redis FIRST — before any slow I/O
@@ -131,6 +140,8 @@ async def submit_simulation(request: MDSimulationRequest, state: AppState = Depe
         simulation_ns=request.simulation_ns,
         temperature=request.temperature,
         pressure=request.pressure,
+        intent=request.intent,
+        adaptive_equilibration=request.adaptive_equilibration,
     ))
 
     return {

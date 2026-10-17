@@ -61,3 +61,15 @@ def test_launcher_uses_the_gmx_mmpbsa_interpreter(tmp_path, monkeypatch):
     exe.write_text("#!/opt/env/bin/python3.12\nfrom GMXMMPBSA.app import gmxmmpbsa\n")
     monkeypatch.setattr(analysis.shutil, "which", lambda name: str(exe))
     assert analysis._gmx_mmpbsa_cmd() == ["/opt/env/bin/python3.12", "-c", analysis._GMX_MMPBSA_LAUNCHER]
+
+
+def test_decomposition_keeps_the_chain_when_the_complex_has_chain_ids(tmp_path):
+    csv = tmp_path / "dec.csv"
+    csv.write_text(
+        "DELTAS:\nTotal Decomposition Contribution (TDC)\n"
+        "Frame #,Residue,Internal,van der Waals,Electrostatic,Polar Solvation,Non-Polar Solv.,TOTAL\n"
+        "1,R:A:ASN:23,0.0,-0.09,-3.31,0.65,-0.01,-2.76\n"
+        "1,R:B:SER:45,0.0,-0.5,-1.0,0.5,0.0,-1.0\n"
+        "1,L:C:UNL:160,0.0,-7.0,-0.5,3.4,-1.8,-5.9\n"
+    )
+    assert analysis._parse_mmgbsa_decomp(csv) == {"A:ASN:23": -2.76, "B:SER:45": -1.0}

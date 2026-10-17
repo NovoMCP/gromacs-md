@@ -1479,14 +1479,15 @@ def _parse_mmgbsa_decomp(path: Path) -> Dict[str, float]:
     sums: Dict[str, float] = {}
     counts: Dict[str, int] = {}
     for row in _csv_section_rows(path, "DELTAS"):
-        label = row.get("Residue", "")
-        if not label.startswith("R::"):
-            continue  # the ligand's own term isn't a residue contribution
+        # "R:<chain>:<resname>:<resnum>"; the chain is empty without chain IDs
+        parts = row.get("Residue", "").split(":")
+        if len(parts) != 4 or parts[0] != "R":
+            continue  # the ligand's own term (L:...) isn't a residue contribution
         try:
             total = float(row["TOTAL"])
         except (KeyError, ValueError):
             continue
-        res = label[3:]
+        res = ":".join(parts[1:] if parts[1] else parts[2:])
         sums[res] = sums.get(res, 0.0) + total
         counts[res] = counts.get(res, 0) + 1
     return {r: sums[r] / counts[r] for r in sums}

@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from ..state import AppState, get_state
 from ..auth import validate_api_key
 from ..models import MDSimulationRequest, LigandPreparationRequest, BatchMDRequest
+from ..ligand_input import LigandInputError, prepare_ligand_smiles
 from ..pdb_handling import fetch_pdb_from_rcsb
 from ..queue import estimate_runtime_minutes, get_gpu_queue_info
 from ..redis_jobs import update_job_status
@@ -85,6 +86,12 @@ async def submit_simulation(request: MDSimulationRequest, state: AppState = Depe
 
     if not request.pdb_id and not request.pdb_content and not request.ligand_smiles:
         raise HTTPException(status_code=400, detail="Either pdb_id/pdb_content or ligand_smiles must be provided")
+
+    if request.ligand_smiles:
+        try:
+            prepare_ligand_smiles(request.ligand_smiles)
+        except LigandInputError as e:
+            raise HTTPException(status_code=400, detail=f"Ligand can't be parameterized: {e}")
 
     has_protein = bool(request.pdb_id or request.pdb_content)
     has_ligand = bool(request.ligand_smiles)

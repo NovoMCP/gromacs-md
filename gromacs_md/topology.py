@@ -4,6 +4,7 @@ import logging
 import subprocess
 import shutil
 from pathlib import Path
+from typing import List
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,19 @@ def ligand_net_charge(ligand_smiles: str) -> int:
     return Chem.GetFormalCharge(mol)
 
 
+def acpype_errors(output: str) -> str:
+    """ACPYPE's own ERROR lines, without its quote banners and tracebacks."""
+    seen: List[str] = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line.startswith("ERROR:") or "+++" in line or "amber.sh" in line:
+            continue
+        msg = line[len("ERROR:"):].strip()
+        if msg and msg not in seen:
+            seen.append(msg)
+    return "; ".join(seen[-6:])
+
+
 def generate_ligand_topology(workspace: Path, compound_id: str, ligand_pdb: Path, ligand_smiles: str):
     """Generate GROMACS topology for ligand using OpenBabel + ACPYPE."""
     # ACPYPE doesn't handle hyphens well in base names — normalize
@@ -73,7 +87,7 @@ def generate_ligand_topology(workspace: Path, compound_id: str, ligand_pdb: Path
         # ACPYPE reports its errors on stdout
         out = b"\n".join(x for x in (result.stdout, result.stderr) if x).decode(errors="replace")
         logger.error(f"ACPYPE failed:\n{out[-4000:]}")
-        raise subprocess.CalledProcessError(result.returncode, "acpype", stderr=result.stderr)
+        raise subprocess.CalledProcessError(result.returncode, "acpype", stderr=acpype_errors(out))
 
     acpype_dir = workspace / f"{acpype_base}.acpype"
     ligand_gro = acpype_dir / f"{acpype_base}_GMX.gro"

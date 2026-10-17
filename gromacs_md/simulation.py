@@ -18,6 +18,7 @@ from .state import AppState
 from .redis_jobs import update_job_status, complete_job, fail_job, refuse_job
 from .s3_storage import upload_results_to_blob
 from .subprocess_utils import run_subprocess, load_mdrun_retries, without_nsteps
+from .ligand_input import LigandInputError, prepare_ligand_smiles
 from .placement import native_ligand_site, place_ligand, save_placement, load_placement
 from .pdb_handling import (
     clean_pdb_protein_only,
@@ -497,6 +498,18 @@ async def run_simulation_pipeline(
     """
     loop = asyncio.get_event_loop()
     completed = list(completed_stages or [])
+
+    # Salts keep their largest component; unsupported elements fail here
+    # with a reason instead of deep inside ACPYPE.
+    ligand_notes: List[str] = []
+    if ligand_smiles:
+        try:
+            ligand_smiles, ligand_notes = prepare_ligand_smiles(ligand_smiles)
+        except LigandInputError as e:
+            await fail_job(state, job_id, f"Ligand can't be parameterized: {e}")
+            return
+        for note in ligand_notes:
+            logger.info(f"Job {job_id}: ligand SMILES: {note}")
 
     # Skip intake on resume if system_prep already completed — the classifier
     # already approved this protein on the first attempt. If system_prep is
@@ -1097,6 +1110,8 @@ async def run_simulation_pipeline(
                 "ligand_placement": load_placement(workspace),
                 # mdrun stages that failed on the GPU: retried there, or rerun on the CPU
                 "mdrun_retries": load_mdrun_retries(workspace),
+                # Changes made to the submitted SMILES (e.g. a salt's counter-ion dropped)
+                "ligand_input_notes": ligand_notes or None,
             }
 
             # Upload to object storage

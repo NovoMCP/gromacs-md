@@ -1667,7 +1667,8 @@ def analyze_ligand_dynamics(workspace: Path, compound_id: str) -> Dict[str, Any]
     """Ligand-specific trajectory analysis beyond the protein-wide RMSD.
 
     Adds three Theo-requested metrics:
-      - ligand_rmsd: how much the ligand has moved/drifted in the pocket
+      - ligand_rmsd: how far the ligand has moved from its starting pose,
+        after fitting the protein (so drift in the pocket, not its change of shape)
       - hbond_persistence: fraction of frames each protein-ligand H-bond
         was maintained. Theo's thresholds: >75% = "High Quality", <30% =
         "False Positive"
@@ -1698,19 +1699,32 @@ def analyze_ligand_dynamics(workspace: Path, compound_id: str) -> Dict[str, Any]
 
     step_errors: List[str] = []
 
-    # --- Ligand RMSD ---
+    # --- Ligand RMSD: the pose in the protein's frame ---
+    # Fitting on the ligand itself would only measure its change of shape
+    # (~0.1 A for a rigid ring however far it drifts). Fit on the protein and
+    # measure the ligand, on a trajectory where both are whole and in the
+    # same periodic image.
     try:
+        centered = f"{compound_id}_md_centered.xtc"
         subprocess.run(
-            ["gmx", "rms", "-s", f"{compound_id}_md.tpr", "-f", f"{compound_id}_md.xtc",
+            ["gmx", "trjconv", "-s", f"{compound_id}_md.tpr", "-f", f"{compound_id}_md.xtc",
+             "-n", ndx_path.name, "-o", centered, "-pbc", "mol", "-center"],
+            input=f"{prot_str}\n0\n".encode(), check=True, cwd=workspace,
+            capture_output=True, timeout=600,
+        )
+        subprocess.run(
+            ["gmx", "rms", "-s", f"{compound_id}_md.tpr", "-f", centered,
              "-n", ndx_path.name,
              "-o", f"{compound_id}_ligand_rmsd.xvg", "-tu", "ns"],
-            input=f"{lig_str}\n{lig_str}\n".encode(), check=True, cwd=workspace,
+            input=f"{prot_str}\n{lig_str}\n".encode(), check=True, cwd=workspace,
             capture_output=True, timeout=300,
         )
+        (workspace / centered).unlink(missing_ok=True)
         rmsd_rows = _parse_xvg(workspace / f"{compound_id}_ligand_rmsd.xvg")
         if rmsd_rows:
             vals = [r[1] for r in rmsd_rows if len(r) >= 2]
             out["ligand_rmsd"] = {
+                "fit": "protein",
                 "mean_nm": round(sum(vals) / len(vals), 4) if vals else None,
                 "max_nm": round(max(vals), 4) if vals else None,
                 "final_nm": round(vals[-1], 4) if vals else None,

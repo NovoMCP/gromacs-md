@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -483,19 +484,34 @@ def production_ns_done(md_log: Path) -> Optional[float]:
 
 async def _production_progress(
     state: AppState, job_id: str, md_log: Path, simulation_ns: float, interval: float = 60.0,
+    clock: Callable[[], float] = time.monotonic,
 ):
-    """Report production progress (67-90%) from the mdrun log until cancelled."""
+    """Report production progress (67-90%) from the mdrun log until cancelled.
+
+    Once two readings are in, the remaining production time comes from the
+    measured rate, not the submission-time estimate (calibrated on an A100,
+    and several times too short on slower GPUs or a shared one).
+    """
+    first = None  # (monotonic time, ns done) at the first reading
     while True:
         await asyncio.sleep(interval)
         done = production_ns_done(md_log)
         if done is None or simulation_ns <= 0:
             continue
         frac = min(done / simulation_ns, 1.0)
-        await update_job_status(state, job_id, "processing", {
+        progress = {
             "percentage": 67 + int(23 * frac),
             "message": f"Production MD ({simulation_ns}ns): {done:.2f} ns done",
             "step": "production",
-        })
+        }
+        now = clock()
+        if first is None:
+            first = (now, done)
+        elif done > first[1]:
+            ns_per_min = (done - first[1]) / ((now - first[0]) / 60)
+            progress["production_remaining_minutes"] = round(max(simulation_ns - done, 0) / ns_per_min)
+            progress["ns_per_day"] = round(ns_per_min * 1440, 1)
+        await update_job_status(state, job_id, "processing", progress)
 
 
 async def _run_simulation_pipeline(

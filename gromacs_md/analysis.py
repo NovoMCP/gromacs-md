@@ -20,17 +20,44 @@ logger = logging.getLogger(__name__)
 # igb=5 is OBC2 (Onufriev-Bashford-Case, 2004) — standard for drug-discovery
 # MM-GBSA, tolerates protein and small-molecule ligand geometries. salt_conc=0.15
 # matches physiological. interval=10 means every 10th frame contributes.
-MMPBSA_INPUT_GB_BASE = """&general
-  startframe=1, interval=10, verbose=2,
+_MMPBSA_INPUT_GB_TEMPLATE = """&general
+  startframe=1, interval={interval}, verbose=2,
   keep_files=0, netcdf=1
 /
 &gb
   igb=5, saltcon=0.150,
 /
 """
+MMPBSA_INPUT_GB_BASE = _MMPBSA_INPUT_GB_TEMPLATE.format(interval=10)
+
+# Frames scored per run at most. Every 10th frame of a 10 ns trajectory is
+# 500 frames, which at ~10 frames/min on the GB10 (complex and receptor each)
+# runs far past the 30 min gmx_MMPBSA timeout; 50 evenly spaced frames keep
+# long runs at the cost of a short one.
+MMGBSA_MAX_FRAMES = 50
 
 
-def _mmpbsa_input_with_decomp(cutoff_angstrom: float) -> str:
+def _md_frame_count(workspace: Path, compound_id: str) -> Optional[int]:
+    """Frames in the production .xtc, from nsteps / nstxout-compressed in the md.mdp."""
+    opts = {}
+    try:
+        for line in (workspace / f"{compound_id}_md.mdp").read_text().splitlines():
+            if "=" in line:
+                k, v = line.split(";")[0].split("=", 1)
+                opts[k.strip().replace("_", "-")] = v.strip()
+        return int(opts["nsteps"]) // int(opts["nstxout-compressed"]) + 1
+    except (OSError, KeyError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _mmgbsa_interval(n_frames: Optional[int]) -> int:
+    """Every 10th frame, sparser when that would exceed MMGBSA_MAX_FRAMES."""
+    if not n_frames:
+        return 10
+    return max(10, -(-n_frames // MMGBSA_MAX_FRAMES))
+
+
+def _mmpbsa_input_with_decomp(cutoff_angstrom: float, interval: int = 10) -> str:
     """Base input plus a per-residue decomposition (&decomp) namelist.
 
     idecomp=1 gives per-residue energies without pairwise interaction terms
@@ -45,7 +72,7 @@ def _mmpbsa_input_with_decomp(cutoff_angstrom: float) -> str:
     MM-GBSA run — not just decomposition. So we only ever emit a cutoff that
     we've confirmed selects at least one residue.
     """
-    return MMPBSA_INPUT_GB_BASE + (
+    return _MMPBSA_INPUT_GB_TEMPLATE.format(interval=interval) + (
         "&decomp\n"
         f'  idecomp=1, print_res="within {cutoff_angstrom:.1f}",\n'
         "  dec_verbose=0,\n"
@@ -1549,11 +1576,12 @@ def run_mmgbsa_analysis(
     # empty "within X" selection makes it crash on list2range('')['string'].
     decomp_cutoff = _decomp_cutoff_angstrom(md_gro_path)
     decomp_enabled = decomp_cutoff is not None
+    interval = _mmgbsa_interval(_md_frame_count(workspace, compound_id))
     if decomp_enabled:
-        mmpbsa_in.write_text(_mmpbsa_input_with_decomp(decomp_cutoff))
-        logger.info(f"MM-GBSA: per-residue decomposition within {decomp_cutoff:.1f} Å")
+        mmpbsa_in.write_text(_mmpbsa_input_with_decomp(decomp_cutoff, interval))
+        logger.info(f"MM-GBSA: per-residue decomposition within {decomp_cutoff:.1f} Å, every {interval} frames")
     else:
-        mmpbsa_in.write_text(MMPBSA_INPUT_GB_BASE)
+        mmpbsa_in.write_text(_MMPBSA_INPUT_GB_TEMPLATE.format(interval=interval))
         logger.info(
             "MM-GBSA: ligand not in contact with protein (no residue within "
             "~9 Å) — running ΔG_bind without per-residue decomposition"
@@ -1621,6 +1649,7 @@ def run_mmgbsa_analysis(
         "method": "MM-GBSA (GB-OBC2, igb=5, saltcon=0.15 M)",
         "per_residue_top10": per_residue_top10,
         "trajectory": trajectory,
+        "frame_interval": interval,
     }
     if decomp_enabled:
         result["decomp_cutoff_angstrom"] = decomp_cutoff

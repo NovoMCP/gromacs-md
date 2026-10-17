@@ -12,6 +12,10 @@ from ..redis_jobs import fail_if_orphaned
 
 logger = logging.getLogger(__name__)
 
+# Trajectory analysis after production (RMSD, ligand dynamics, MM-GBSA on
+# at most 50 frames: ~3 min for a 10 ns 181L run on the GB10)
+ANALYSIS_MINUTES = 5
+
 router = APIRouter()
 
 
@@ -66,9 +70,15 @@ async def get_job_status(job_id: str, state: AppState = Depends(get_state)):
                 try:
                     elapsed = (datetime.utcnow() - datetime.fromisoformat(submitted_at)).total_seconds() / 60
                     remaining = max(0, round(int(est_total) - elapsed))
+                    measured = progress.get("production_remaining_minutes")
+                    if measured is not None:
+                        # production's measured rate, plus the analysis that follows it
+                        remaining = int(measured) + ANALYSIS_MINUTES
                     response["estimated_remaining_minutes"] = remaining
-                    response["estimated_total_minutes"] = int(est_total)
+                    response["estimated_total_minutes"] = round(elapsed) + remaining if measured is not None else int(est_total)
                     response["elapsed_minutes"] = round(elapsed)
+                    if progress.get("ns_per_day") is not None:
+                        response["ns_per_day"] = progress["ns_per_day"]
                 except (ValueError, TypeError):
                     pass
             # GPU queue info

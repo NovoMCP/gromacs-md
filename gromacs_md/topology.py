@@ -34,6 +34,14 @@ def process_protein_with_gromacs(workspace: Path, compound_id: str, pdb_path: Pa
     return gro_file, top_file
 
 
+def ligand_net_charge(ligand_smiles: str) -> int:
+    from rdkit import Chem
+    mol = Chem.MolFromSmiles(ligand_smiles)
+    if mol is None:
+        raise ValueError(f"Invalid SMILES: {ligand_smiles}")
+    return Chem.GetFormalCharge(mol)
+
+
 def generate_ligand_topology(workspace: Path, compound_id: str, ligand_pdb: Path, ligand_smiles: str):
     """Generate GROMACS topology for ligand using OpenBabel + ACPYPE."""
     # ACPYPE doesn't handle hyphens well in base names — normalize
@@ -52,14 +60,19 @@ def generate_ligand_topology(workspace: Path, compound_id: str, ligand_pdb: Path
     # ACPYPE expects a 'tmp' directory in cwd
     (workspace / "tmp").mkdir(exist_ok=True)
 
-    logger.info("Running ACPYPE for ligand parameterization...")
+    # The net charge comes from the SMILES. Left to guess, ACPYPE sets
+    # benzamidinium (+1) to 0, and sqm then fails on the odd electron count.
+    net_charge = ligand_net_charge(ligand_smiles)
+    logger.info(f"Running ACPYPE for ligand parameterization (net charge {net_charge})...")
     result = subprocess.run(
-        ["acpype", "-i", str(ligand_mol2), "-b", acpype_base, "-c", "bcc", "-a", "gaff2"],
+        ["acpype", "-i", str(ligand_mol2), "-b", acpype_base, "-c", "bcc", "-a", "gaff2",
+         "-n", str(net_charge)],
         capture_output=True, cwd=workspace,
     )
     if result.returncode != 0:
-        stderr = result.stderr.decode(errors="replace") if result.stderr else ""
-        logger.error(f"ACPYPE failed:\n{stderr}")
+        # ACPYPE reports its errors on stdout
+        out = b"\n".join(x for x in (result.stdout, result.stderr) if x).decode(errors="replace")
+        logger.error(f"ACPYPE failed:\n{out[-4000:]}")
         raise subprocess.CalledProcessError(result.returncode, "acpype", stderr=result.stderr)
 
     acpype_dir = workspace / f"{acpype_base}.acpype"
@@ -172,6 +185,7 @@ def combine_protein_ligand(
     with open(complex_top, "w") as f:
         with open(protein_top, "r") as pf:
             atomtypes_written = False
+            line = "\n"
             for line in pf:
                 f.write(line)
                 # Insert ligand atomtypes right after forcefield.itp include
@@ -179,20 +193,14 @@ def combine_protein_ligand(
                     f.write("\n; Ligand atom types from ACPYPE/GAFF2\n")
                     f.write(atomtypes_section + "\n")
                     atomtypes_written = True
-                # Insert ligand itp include and molecule entry at [ molecules ]
-                if "[ molecules ]" in line:
-                    # Write ligand itp include before molecule list
-                    # (already wrote [ molecules ] line above)
-                    # Read remaining lines to find protein mol entry and append ligand
-                    for mol_line in pf:
-                        f.write(mol_line)
-                        if mol_line.strip() and not mol_line.startswith(";"):
-                            # This is the protein molecule entry — add ligand after it
-                            f.write(f"{ligand_mol_name}               1\n")
-                            break
-                    # Also need the ligand itp include — place before [ system ]
-        # Now re-read and insert ligand itp include in right place
-        # Actually, we need to add the include above [ system ] section
+        # The ligand's coordinates follow every protein chain in complex_gro,
+        # so its [ molecules ] entry goes after all of them: [ molecules ] is
+        # the last section pdb2gmx writes. (Placed after the first entry, a
+        # two-chain protein read as chain A, ligand, chain B against
+        # coordinates A, B, ligand — every atom after chain A mismatched.)
+        if not line.endswith("\n"):
+            f.write("\n")
+        f.write(f"{ligand_mol_name}               1\n")
 
     # Re-read complex_top and insert ligand #include before [ system ]
     with open(complex_top, "r") as f:

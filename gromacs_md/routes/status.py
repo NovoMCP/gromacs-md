@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from ..state import AppState, get_state
 from ..queue import get_gpu_queue_info
+from ..redis_jobs import fail_if_orphaned
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,9 @@ async def get_job_status(job_id: str, state: AppState = Depends(get_state)):
 
         if not data:
             return {"job_id": job_id, "status": "not_found", "progress": 0}
+
+        if await fail_if_orphaned(state, job_id, data):
+            data = await state.redis.hgetall(key)
 
         progress = {}
         if "progress" in data:

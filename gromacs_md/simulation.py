@@ -15,7 +15,7 @@ from intake import classify_structure
 
 from .config import NTOMP
 from .state import AppState
-from .redis_jobs import update_job_status, complete_job, fail_job, refuse_job
+from .redis_jobs import update_job_status, complete_job, fail_job, refuse_job, keep_alive
 from .s3_storage import upload_results_to_blob
 from .subprocess_utils import run_subprocess, load_mdrun_retries, without_nsteps
 from .ligand_input import LigandInputError, prepare_ligand_smiles
@@ -448,7 +448,57 @@ async def _run_membrane_pipeline(
             await fail_job(state, job_id, str(e))
 
 
-async def run_simulation_pipeline(
+async def run_simulation_pipeline(state: AppState, job_id: str, *args, **kwargs):
+    """Run the pipeline with a heartbeat, so /status can tell a job whose
+    worker died (service restart, crash) from one that is still running.
+    Arguments are those of _run_simulation_pipeline."""
+    alive = asyncio.create_task(keep_alive(state, job_id))
+    try:
+        await _run_simulation_pipeline(state, job_id, *args, **kwargs)
+    finally:
+        alive.cancel()
+        try:
+            await alive
+        except asyncio.CancelledError:
+            pass
+
+
+def production_ns_done(md_log: Path) -> Optional[float]:
+    """Simulated time (ns) of the last energy record in an mdrun log."""
+    try:
+        with open(md_log, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 65536))
+            lines = f.read().decode(errors="replace").splitlines()
+    except OSError:
+        return None
+    for i in range(len(lines) - 2, -1, -1):
+        if lines[i].split() == ["Step", "Time"]:
+            try:
+                return float(lines[i + 1].split()[1]) / 1000.0
+            except (IndexError, ValueError):
+                return None
+    return None
+
+
+async def _production_progress(
+    state: AppState, job_id: str, md_log: Path, simulation_ns: float, interval: float = 60.0,
+):
+    """Report production progress (67-90%) from the mdrun log until cancelled."""
+    while True:
+        await asyncio.sleep(interval)
+        done = production_ns_done(md_log)
+        if done is None or simulation_ns <= 0:
+            continue
+        frac = min(done / simulation_ns, 1.0)
+        await update_job_status(state, job_id, "processing", {
+            "percentage": 67 + int(23 * frac),
+            "message": f"Production MD ({simulation_ns}ns): {done:.2f} ns done",
+            "step": "production",
+        })
+
+
+async def _run_simulation_pipeline(
     state: AppState,
     job_id: str,
     compound_id: str,
@@ -1036,15 +1086,19 @@ async def run_simulation_pipeline(
                         f"Job {job_id}: production resume via -cpi -append from {production_cpt}"
                     )
 
+                progress_task = asyncio.create_task(_production_progress(
+                    state, job_id, workspace / f"{compound_id}_md.log", simulation_ns,
+                ))
                 try:
                     await loop.run_in_executor(None, run_subprocess, mdrun_cmd, workspace)
                 finally:
-                    if cpt_task is not None:
-                        cpt_task.cancel()
-                        try:
-                            await cpt_task
-                        except (asyncio.CancelledError, Exception):
-                            pass
+                    for task in (cpt_task, progress_task):
+                        if task is not None:
+                            task.cancel()
+                            try:
+                                await task
+                            except (asyncio.CancelledError, Exception):
+                                pass
 
                 _finalize_stage(workspace, "production", [f"{compound_id}_md.*"])
                 if checkpoint_callback:

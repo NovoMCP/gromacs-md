@@ -39,6 +39,7 @@ SuggestedBranch = Literal[
     "charmm36m_membrane",   # future: membrane branch (doc 02)
     "mcpb_distal",          # future: MCPB workflow for structural/distal metals
     "qmmm_active_site",     # future: QM/MM for catalytic metals
+    "covalent_ligand",      # future: covalent-ligand parameterization
 ]
 
 
@@ -97,6 +98,7 @@ class SystemProfile(BaseModel):
     heme_residues: List[str] = Field(default_factory=list)    # ["HEM"] etc.
     fes_clusters: Dict[str, int] = Field(default_factory=dict)  # {"SF4": 2}
     hetatm_inventory: List[str] = Field(default_factory=list)   # other non-standard residues
+    covalent_links: List[str] = Field(default_factory=list)     # ligand-protein LINK records
 
     # PTMs (doc 04 scope — placeholder for v0, populated in later versions)
     ptm_residues: List[str] = Field(default_factory=list)

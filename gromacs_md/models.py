@@ -12,6 +12,11 @@ class MDSimulationRequest(BaseModel):
     simulation_ns: float = 10.0
     temperature: float = 300.0
     pressure: float = 1.0
+    # Scientific intent for the quality report's adequacy grading
+    # (smoke_test, equilibration_only, pose_stability, mm_gbsa)
+    intent: Optional[str] = None
+    # Extend NPT in 100 ps chunks until the density plateaus (up to 1 ns)
+    adaptive_equilibration: bool = False
 
 
 class LigandPreparationRequest(BaseModel):

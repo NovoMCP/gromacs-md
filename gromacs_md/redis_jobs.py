@@ -17,9 +17,24 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-async def update_job_status(state: AppState, job_id: str, status: str, progress: Dict[str, Any]):
-    """Update job status in Redis using the orchestrator-compatible format."""
+async def is_job_cancelled(state: AppState, job_id: str) -> bool:
     if not state.redis:
+        return False
+    try:
+        return await state.redis.hget(f"novomcp:job:{job_id}", "status") == "cancelled"
+    except Exception:
+        return False
+
+
+async def update_job_status(state: AppState, job_id: str, status: str, progress: Dict[str, Any]):
+    """Update job status in Redis using the orchestrator-compatible format.
+
+    A cancelled job keeps its status: the pipeline unwinding after its
+    processes are killed doesn't overwrite it with progress or a failure.
+    """
+    if not state.redis:
+        return
+    if status != "cancelled" and await is_job_cancelled(state, job_id):
         return
     try:
         key = f"novomcp:job:{job_id}"
@@ -38,7 +53,7 @@ async def update_job_status(state: AppState, job_id: str, status: str, progress:
 
 async def complete_job(state: AppState, job_id: str, result: Dict[str, Any]):
     """Mark job as completed in Redis (3-key format for orchestrator compatibility)."""
-    if not state.redis:
+    if not state.redis or await is_job_cancelled(state, job_id):
         return
     try:
         now = datetime.utcnow().isoformat()

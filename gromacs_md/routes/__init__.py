@@ -2,7 +2,7 @@
 
 from fastapi import FastAPI
 
-from . import health, audit, metal, simulate, status
+from . import health, audit, cancel, metal, simulate, status
 
 
 def register_routes(app: FastAPI):
@@ -11,3 +11,4 @@ def register_routes(app: FastAPI):
     app.include_router(metal.router)
     app.include_router(simulate.router)
     app.include_router(status.router)
+    app.include_router(cancel.router)

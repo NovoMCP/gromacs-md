@@ -1835,22 +1835,39 @@ def analyze_trajectory(
     MM-GBSA and record why.
     """
     analysis = {}
+    # has_protein default: if not explicitly provided, infer from top_file
+    # (ligand-only runs are called with top_file=None per the routes/
+    # simulate.py logic).
+    _has_protein = has_protein if has_protein is not None else bool(top_file)
     try:
         # --- Production trajectory analysis (existing) ---
+        if _has_protein:
+            # default groups of a protein system: 1 Protein, 4 Backbone
+            ndx_args, rms_in, gyrate_in = [], b"4\n4\n", b"1\n"
+        else:
+            # A ligand-only system has no protein; its default group numbers
+            # point at ions or water (group 4 was CL, or SOL before ions).
+            # Use an explicit ligand group: RMSD and Rg of the ligand.
+            ndx = _make_mmgbsa_index(workspace, compound_id, f"{compound_id}_md.gro")
+            if ndx is None:
+                raise RuntimeError("no ligand atoms found in the ligand-only system")
+            ndx_args = ["-n", ndx[0].name]
+            rms_in = gyrate_in = f"{ndx[2]}\n{ndx[2]}\n".encode()
         subprocess.run(
             ["gmx", "rms", "-s", f"{compound_id}_md.tpr", "-f", f"{compound_id}_md.xtc",
-             "-o", f"{compound_id}_rmsd.xvg", "-tu", "ns"],
-            input=b"4\n4\n", check=True, cwd=workspace,
+             "-o", f"{compound_id}_rmsd.xvg", "-tu", "ns"] + ndx_args,
+            input=rms_in, check=True, cwd=workspace,
         )
-        subprocess.run(
-            ["gmx", "rmsf", "-s", f"{compound_id}_md.tpr", "-f", f"{compound_id}_md.xtc",
-             "-o", f"{compound_id}_rmsf.xvg", "-res"],
-            input=b"4\n", check=True, cwd=workspace,
-        )
+        if _has_protein:
+            subprocess.run(
+                ["gmx", "rmsf", "-s", f"{compound_id}_md.tpr", "-f", f"{compound_id}_md.xtc",
+                 "-o", f"{compound_id}_rmsf.xvg", "-res"],
+                input=b"4\n", check=True, cwd=workspace,
+            )
         subprocess.run(
             ["gmx", "gyrate", "-s", f"{compound_id}_md.tpr", "-f", f"{compound_id}_md.xtc",
-             "-o", f"{compound_id}_gyrate.xvg"],
-            input=b"1\n", check=True, cwd=workspace,
+             "-o", f"{compound_id}_gyrate.xvg"] + ndx_args,
+            input=gyrate_in, check=True, cwd=workspace,
         )
 
         # Parse RMSD trajectory (nm)
@@ -1858,6 +1875,7 @@ def analyze_trajectory(
         if rmsd_rows:
             rmsd_values = [r[1] for r in rmsd_rows if len(r) >= 2]
             analysis["rmsd"] = {
+                "group": "backbone" if _has_protein else "ligand",
                 "mean_nm": round(sum(rmsd_values) / len(rmsd_values), 4) if rmsd_values else None,
                 "max_nm": round(max(rmsd_values), 4) if rmsd_values else None,
                 "final_nm": round(rmsd_values[-1], 4) if rmsd_values else None,
@@ -1948,10 +1966,6 @@ def analyze_trajectory(
         )
         analysis["checkpoint"] = validate_checkpoint(workspace, compound_id)
         analysis["log_diagnostics"] = parse_md_log(workspace, compound_id)
-        # has_protein default: if not explicitly provided, infer from top_file
-        # (ligand-only runs are called with top_file=None per the routes/
-        # simulate.py logic).
-        _has_protein = has_protein if has_protein is not None else bool(top_file)
         analysis["quality_report"] = assess_md_quality(
             analysis,
             simulation_ns=simulation_ns,

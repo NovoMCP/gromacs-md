@@ -18,10 +18,12 @@ input (PDB and/or SMILES)
                     ligand:  SMILES → 3D (RDKit) → MOL2 (OpenBabel) → GAFF2 (ACPYPE, AM1-BCC)
                     complex: merge topologies
   → box + solvate   editconf (1.0 nm padding) + solvate
+  → ions            genion: neutralize + 0.15 M NaCl
   → minimize        steepest descent
-  → NVT             V-rescale thermostat → target T
-  → NPT             Parrinello-Rahman barostat → target P
-  → production MD   configurable ns, GPU mdrun
+  → NVT             V-rescale thermostat → target T, velocities generated at T,
+                    solute heavy atoms restrained (-DPOSRES)
+  → NPT             C-rescale barostat → target P, solute still restrained
+  → production MD   configurable ns, GPU mdrun, unrestrained, Parrinello-Rahman
   → analysis        RMSD (gmx rms), RMSF (gmx rmsf), Rg (gmx gyrate)
 ```
 

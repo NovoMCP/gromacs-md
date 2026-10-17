@@ -1401,6 +1401,97 @@ def _make_mmgbsa_index(workspace: Path, compound_id: str, gro_file: str):
     return ndx_path, 1, 2  # protein_idx=1, ligand_idx=2
 
 
+# gmx_MMPBSA 1.5.0.3 takes the std of a correlated difference as
+# sqrt(a**2 + b**2 - 2*a*b), which rounds just below zero when a == b and
+# aborts the whole run with "math domain error" after every frame is done.
+# Launch it with that clamped at zero.
+_GMX_MMPBSA_LAUNCHER = (
+    "import sys\n"
+    "from math import sqrt\n"
+    "import GMXMMPBSA.utils as u\n"
+    "u.get_corrstd = lambda a, b: sqrt(max(0.0, a ** 2 + b ** 2 - 2 * a * b))\n"
+    "from GMXMMPBSA.app import gmxmmpbsa\n"
+    "sys.argv[0] = 'gmx_MMPBSA'\n"
+    "sys.exit(gmxmmpbsa())\n"
+)
+
+
+def _gmx_mmpbsa_cmd() -> List[str]:
+    """gmx_MMPBSA, run through its own Python with the std fix applied."""
+    exe = shutil.which("gmx_MMPBSA")
+    try:
+        with open(exe) as f:
+            shebang = f.readline()
+    except (OSError, TypeError):
+        return ["gmx_MMPBSA"]
+    if shebang.startswith("#!") and "python" in shebang:
+        return [shebang[2:].strip(), "-c", _GMX_MMPBSA_LAUNCHER]
+    return [exe]
+
+
+_MMGBSA_SECTION_TITLES = ("generalized", "poisson", "complex", "receptor", "ligand", "delta")
+
+
+def _csv_section_rows(path: Path, section: str) -> List[Dict[str, str]]:
+    """Rows of one section of a gmx_MMPBSA CSV, keyed by that section's header.
+
+    The -eo/-deo CSVs hold Complex, Receptor, Ligand and Delta sections one
+    after another, each with its own header row. Only the Delta section is
+    the binding energy; the others are absolute energies of each species.
+    """
+    rows: List[Dict[str, str]] = []
+    header: Optional[List[str]] = None
+    inside = False
+    for raw in path.read_text().splitlines():
+        line = raw.strip().strip('"').strip()
+        if not line:
+            continue
+        if "," not in line:
+            # a species title ("Delta Energy Terms", "DELTAS:") switches section;
+            # other titles ("Total Decomposition Contribution (TDC)") don't
+            if line.lower().startswith(_MMGBSA_SECTION_TITLES):
+                inside = line.lower().startswith(section.lower())
+                header = None
+            continue
+        if not inside:
+            continue
+        parts = [x.strip() for x in line.split(",")]
+        if parts[0].lower().startswith("frame"):
+            header = parts
+        elif header and len(parts) == len(header):
+            rows.append(dict(zip(header, parts)))
+    return rows
+
+
+def _parse_mmgbsa_delta(path: Path) -> List[List[float]]:
+    """[[frame, ΔG_bind], ...] from the Delta section of the -eo CSV."""
+    out = []
+    for row in _csv_section_rows(path, "Delta Energy Terms"):
+        try:
+            out.append([int(float(row["Frame #"])), float(row["TOTAL"])])
+        except (KeyError, ValueError):
+            continue
+    return out
+
+
+def _parse_mmgbsa_decomp(path: Path) -> Dict[str, float]:
+    """Mean per-residue ΔG contribution (receptor residues) from the -deo CSV."""
+    sums: Dict[str, float] = {}
+    counts: Dict[str, int] = {}
+    for row in _csv_section_rows(path, "DELTAS"):
+        label = row.get("Residue", "")
+        if not label.startswith("R::"):
+            continue  # the ligand's own term isn't a residue contribution
+        try:
+            total = float(row["TOTAL"])
+        except (KeyError, ValueError):
+            continue
+        res = label[3:]
+        sums[res] = sums.get(res, 0.0) + total
+        counts[res] = counts.get(res, 0) + 1
+    return {r: sums[r] / counts[r] for r in sums}
+
+
 def run_mmgbsa_analysis(
     workspace: Path,
     compound_id: str,
@@ -1468,8 +1559,7 @@ def run_mmgbsa_analysis(
         )
 
     # gmx_MMPBSA -cg takes group INDICES (integers).
-    cmd = [
-        "gmx_MMPBSA",
+    cmd = _gmx_mmpbsa_cmd() + [
         "-O",  # overwrite
         "-i", mmpbsa_in.name,
         "-cs", f"{compound_id}_md.tpr",
@@ -1494,28 +1584,14 @@ def run_mmgbsa_analysis(
     except Exception as e:
         return {"error": f"gmx_MMPBSA failed to launch: {e}"}
 
-    # Parse per-frame ΔG_bind from results CSV
-    # Row format (gmx_MMPBSA -eo output):
-    #   Frame,Complex,Receptor,Ligand,Delta
+    # Per-frame ΔG_bind from the Delta section of the results CSV
     trajectory: List[List[float]] = []
-    dg_values: List[float] = []
     try:
         if results_csv.exists():
-            for line in results_csv.read_text().splitlines():
-                line = line.strip()
-                if not line or line.startswith("#") or line.lower().startswith("frame"):
-                    continue
-                parts = line.split(",")
-                if len(parts) >= 5:
-                    try:
-                        frame = int(float(parts[0]))
-                        delta = float(parts[-1])
-                        trajectory.append([frame, round(delta, 3)])
-                        dg_values.append(delta)
-                    except (ValueError, IndexError):
-                        continue
+            trajectory = [[f, round(dg, 3)] for f, dg in _parse_mmgbsa_delta(results_csv)]
     except Exception as e:
         logger.warning(f"Failed to parse MM-GBSA results CSV: {e}")
+    dg_values = [dg for _, dg in trajectory]
 
     if not dg_values:
         return {"error": "gmx_MMPBSA ran but produced no parseable ΔG values"}
@@ -1524,35 +1600,16 @@ def run_mmgbsa_analysis(
     variance = sum((v - mean_dg) ** 2 for v in dg_values) / max(len(dg_values), 1)
     std_dg = variance ** 0.5
 
-    # Parse per-residue decomposition (top 10 contributors by absolute energy)
+    # Per-residue decomposition: top 10 receptor residues by |mean contribution|
     per_residue_top10: List[Dict[str, Any]] = []
     try:
         if decomp_enabled and decomp_csv.exists():
-            # Row format varies by gmx_MMPBSA version but typically:
-            #   Residue,Internal,VdW,Electrostatic,Solvation,Total
-            residue_contribs: Dict[str, float] = {}
-            for line in decomp_csv.read_text().splitlines():
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if line.lower().startswith(("residue", "frame")):
-                    continue
-                parts = [p.strip() for p in line.split(",")]
-                if len(parts) < 2:
-                    continue
-                res_label = parts[0]
-                # Total energy is last numeric column
-                try:
-                    total = float(parts[-1])
-                    residue_contribs[res_label] = residue_contribs.get(res_label, 0.0) + total
-                except (ValueError, IndexError):
-                    continue
-            top = sorted(residue_contribs.items(), key=lambda kv: abs(kv[1]), reverse=True)[:10]
-            for label, energy in top:
-                per_residue_top10.append({
-                    "residue": label,
-                    "contribution_kcal_mol": round(energy, 3),
-                })
+            contribs = _parse_mmgbsa_decomp(decomp_csv)
+            top = sorted(contribs.items(), key=lambda kv: abs(kv[1]), reverse=True)[:10]
+            per_residue_top10 = [
+                {"residue": label, "contribution_kcal_mol": round(energy, 3)}
+                for label, energy in top
+            ]
     except Exception as e:
         logger.warning(f"Failed to parse MM-GBSA decomposition CSV: {e}")
 

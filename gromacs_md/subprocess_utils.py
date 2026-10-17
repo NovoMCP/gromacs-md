@@ -60,7 +60,21 @@ def _resume_args(args, workspace, failed_run_started: float) -> List[str]:
     if deffnm and "-cpi" not in out:
         cpt = Path(workspace) / f"{deffnm}.cpt"
         if cpt.exists() and cpt.stat().st_mtime >= failed_run_started:
-            out += ["-cpi", cpt.name, "-append"]
+            out = without_nsteps(out) + ["-cpi", cpt.name, "-append"]
+    return out
+
+
+def without_nsteps(args) -> List[str]:
+    """Drop -nsteps for a run continued from a checkpoint.
+
+    On a -cpi restart mdrun counts -nsteps from the checkpoint's step, so a
+    stage resumed at step N would run N steps past its length. The .tpr
+    already holds the stage's total.
+    """
+    out = [str(a) for a in args]
+    if "-nsteps" in out:
+        i = out.index("-nsteps")
+        del out[i:i + 2]
     return out
 
 

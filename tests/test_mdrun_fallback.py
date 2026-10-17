@@ -29,6 +29,23 @@ def test_cpu_args_resume_from_a_checkpoint_the_failed_run_wrote(tmp_path):
     assert out[-3:] == ["-cpi", "x_nvt.cpt", "-append"]
 
 
+def test_a_resumed_run_drops_nsteps(tmp_path):
+    # mdrun counts -nsteps from the checkpoint's step: kept, a stage resumed
+    # at step 3200 of 30000 ran to 33200
+    started = time.time() - 1
+    (tmp_path / "x_md.cpt").write_text("")
+    prod = ["gmx", "mdrun", "-deffnm", "x_md", "-nb", "gpu", "-nsteps", "30000"]
+    out = su._resume_args(prod, tmp_path, started)
+    assert "-nsteps" not in out and "30000" not in out
+    assert out[-3:] == ["-cpi", "x_md.cpt", "-append"]
+
+
+def test_a_fresh_rerun_keeps_nsteps(tmp_path):
+    prod = ["gmx", "mdrun", "-deffnm", "x_md", "-nb", "gpu", "-nsteps", "30000"]
+    out = su.mdrun_cpu_args(prod, tmp_path, time.time())
+    assert out[out.index("-nsteps") + 1] == "30000"
+
+
 def test_cpu_args_ignore_a_stale_checkpoint(tmp_path):
     cpt = tmp_path / "x_nvt.cpt"
     cpt.write_text("")

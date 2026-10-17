@@ -17,7 +17,7 @@ from .config import NTOMP
 from .state import AppState
 from .redis_jobs import update_job_status, complete_job, fail_job, refuse_job
 from .s3_storage import upload_results_to_blob
-from .subprocess_utils import run_subprocess, load_mdrun_retries
+from .subprocess_utils import run_subprocess, load_mdrun_retries, without_nsteps
 from .placement import native_ligand_site, place_ligand, save_placement, load_placement
 from .pdb_handling import (
     clean_pdb_protein_only,
@@ -996,7 +996,7 @@ async def run_simulation_pipeline(
                     "-nsteps", str(int(simulation_ns * 500000)),
                 ]
                 if is_production_resume:
-                    mdrun_cmd.extend(["-cpi", f"{compound_id}_md.cpt", "-append"])
+                    mdrun_cmd = without_nsteps(mdrun_cmd) + ["-cpi", f"{compound_id}_md.cpt", "-append"]
                     logger.info(
                         f"Job {job_id}: production resume via -cpi -append from {production_cpt}"
                     )

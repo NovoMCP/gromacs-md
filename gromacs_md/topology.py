@@ -72,6 +72,32 @@ def generate_ligand_topology(workspace: Path, compound_id: str, ligand_pdb: Path
     return workspace / f"{compound_id}_ligand.gro", workspace / f"{compound_id}_ligand.itp"
 
 
+def write_ligand_posre(itp_lines, out_path: Path, k: int = 1000) -> Path:
+    """Heavy-atom position restraints for the ligand, as pdb2gmx writes them
+    for the protein (1000 kJ/mol/nm²), from the itp's [ atoms ] section."""
+    heavy = []
+    in_atoms = False
+    for line in itp_lines:
+        stripped = line.split(";")[0].strip()
+        if stripped.startswith("["):
+            in_atoms = stripped.replace(" ", "") == "[atoms]"
+            continue
+        if not in_atoms or not stripped:
+            continue
+        fields = stripped.split()
+        # nr type resnr residue atom cgnr charge mass
+        mass = float(fields[7]) if len(fields) > 7 else None
+        is_h = mass < 1.5 if mass is not None else fields[4].upper().startswith("H")
+        if not is_h:
+            heavy.append(int(fields[0]))
+    with open(out_path, "w") as f:
+        f.write("; ligand heavy-atom position restraints\n[ position_restraints ]\n")
+        f.write(";  ai  funct    fcx    fcy    fcz\n")
+        for ai in heavy:
+            f.write(f"{ai:6d}      1   {k}   {k}   {k}\n")
+    return out_path
+
+
 def combine_protein_ligand(
     workspace: Path,
     compound_id: str,
@@ -124,9 +150,12 @@ def combine_protein_ligand(
         else:
             cleaned_itp_lines.append(line)
 
-    # Write cleaned itp
+    # Write cleaned itp, with the ligand's equilibration restraints (the
+    # protein's come from pdb2gmx) so it holds its docked pose under -DPOSRES
+    posre = write_ligand_posre(cleaned_itp_lines, workspace / f"{compound_id}_ligand_posre.itp")
     with open(ligand_itp, "w") as f:
         f.writelines(cleaned_itp_lines)
+        f.write(f'\n#ifdef POSRES\n#include "{posre.name}"\n#endif\n')
 
     # Read the molecule name from the ligand ITP [ moleculetype ] section
     ligand_mol_name = compound_id
@@ -260,15 +289,26 @@ pbc         = xyz
         f.write(content)
 
 
+# NVT and NPT hold the solute's heavy atoms on their minimized positions
+# (-DPOSRES: pdb2gmx's posre.itp for the protein, the ligand's from
+# write_ligand_posre) while the solvent relaxes around it, and NVT starts from
+# Maxwell velocities at the target temperature. Unrestrained and heated from
+# 0 K, a protein jumps ~2.5 Å Cα RMSD from the crystal structure within the
+# first 5 ps, before production starts. A ligand-only topology has no
+# restraint blocks, so the define does nothing there.
 def write_nvt_mdp(workspace: Path, compound_id: str, temperature: float):
     content = f"""\
 integrator              = md
 nsteps                  = 100000
 dt                      = 0.001
+define                  = -DPOSRES
 nstxout                 = 1000
 nstvout                 = 1000
 nstenergy               = 1000
 nstlog                  = 1000
+gen_vel                 = yes
+gen_temp                = {temperature}
+gen_seed                = -1
 tcoupl                  = V-rescale
 tc-grps                 = System
 tau_t                   = 0.1
@@ -298,6 +338,9 @@ def write_npt_mdp(workspace: Path, compound_id: str, temperature: float, pressur
 integrator              = md
 nsteps                  = {nsteps}
 dt                      = 0.001
+define                  = -DPOSRES
+refcoord_scaling        = com
+continuation            = yes
 nstxout                 = 1000
 nstvout                 = 1000
 nstenergy               = 1000
@@ -306,7 +349,7 @@ tcoupl                  = V-rescale
 tc-grps                 = System
 tau_t                   = 0.1
 ref_t                   = {temperature}
-pcoupl                  = Parrinello-Rahman
+pcoupl                  = C-rescale
 pcoupltype              = isotropic
 tau_p                   = 2.0
 ref_p                   = {pressure}
@@ -322,6 +365,8 @@ constraint_algorithm    = lincs
 lincs-iter              = 2
 lincs-order             = 6
 """
+    # C-rescale, not Parrinello-Rahman: grompp flags P-R with position
+    # restraints as unstable. Production (unrestrained) keeps P-R.
     with open(workspace / f"{compound_id}_npt.mdp", "w") as f:
         f.write(content)
 

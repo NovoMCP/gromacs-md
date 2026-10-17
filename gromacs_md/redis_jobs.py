@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime
 from typing import TYPE_CHECKING, Dict, Any
 
+from .config import JOB_HEARTBEAT_SECONDS, JOB_STALE_SECONDS
 from .state import AppState
 
 if TYPE_CHECKING:
@@ -85,6 +87,46 @@ async def fail_job(state: AppState, job_id: str, error: str):
         })
     except Exception as e:
         logger.error(f"Failed to mark job {job_id} as failed: {e}")
+
+
+async def heartbeat(state: AppState, job_id: str):
+    """Record that a worker is still on this job."""
+    if not state.redis:
+        return
+    try:
+        await state.redis.hset(f"novomcp:job:{job_id}", "heartbeat_at", datetime.utcnow().isoformat())
+    except Exception as e:
+        logger.warning(f"Heartbeat for {job_id} failed: {e}")
+
+
+async def keep_alive(state: AppState, job_id: str, interval: float = JOB_HEARTBEAT_SECONDS):
+    """Heartbeat until cancelled. Run alongside a job for its whole life."""
+    while True:
+        await heartbeat(state, job_id)
+        await asyncio.sleep(interval)
+
+
+def heartbeat_age_seconds(data: Dict[str, Any]) -> float | None:
+    """Seconds since the job's last heartbeat, or None for jobs without one."""
+    try:
+        return (datetime.utcnow() - datetime.fromisoformat(data["heartbeat_at"])).total_seconds()
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+async def fail_if_orphaned(state: AppState, job_id: str, data: Dict[str, Any]) -> bool:
+    """Fail an unfinished job whose worker stopped heartbeating. True if it did."""
+    if data.get("status") not in ("queued", "running", "processing"):
+        return False
+    age = heartbeat_age_seconds(data)
+    if age is None or age < JOB_STALE_SECONDS:
+        return False
+    await fail_job(
+        state, job_id,
+        f"gromacs-md stopped working on this job (no heartbeat for {int(age // 60)} min; "
+        "the service was restarted or crashed). Resubmit it.",
+    )
+    return True
 
 
 async def refuse_job(state: AppState, job_id: str, decision: RoutingDecision):

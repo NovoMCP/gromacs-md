@@ -26,3 +26,9 @@ AUTODOCK_GPU_API_KEY = os.environ.get("AUTODOCK_GPU_API_KEY", "")
 MDRUN_GPU_RETRIES = int(os.environ.get("MDRUN_GPU_RETRIES", "2"))
 MDRUN_CPU_FALLBACK = os.environ.get("MDRUN_CPU_FALLBACK", "1") != "0"
 MDRUN_CPU_NTOMP = int(os.environ.get("MDRUN_CPU_NTOMP", str(os.cpu_count() or NTOMP)))
+
+# A running job's heartbeat is written every JOB_HEARTBEAT_SECONDS. A job
+# whose heartbeat is older than JOB_STALE_SECONDS lost its worker (the
+# service restarted or crashed) and /status reports it failed.
+JOB_HEARTBEAT_SECONDS = int(os.environ.get("JOB_HEARTBEAT_SECONDS", "60"))
+JOB_STALE_SECONDS = int(os.environ.get("JOB_STALE_SECONDS", "300"))

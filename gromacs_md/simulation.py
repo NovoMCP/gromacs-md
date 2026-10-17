@@ -740,10 +740,32 @@ async def run_simulation_pipeline(
                     workspace,
                 )
 
-                # Solvate's output is the input for EM. Record the final
+                # Ions: neutralize, then 0.15 M NaCl. Without them the system
+                # carries the solute's net charge (+8 for T4 lysozyme) under
+                # PME — grompp warns of severe artifacts, hidden by -maxwarn.
+                await update_job_status(state, job_id, "processing", {
+                    "percentage": 13, "message": "Adding ions", "step": "genion",
+                })
+                write_em_mdp(workspace, compound_id)
+                await loop.run_in_executor(
+                    None, run_subprocess,
+                    ["gmx", "grompp", "-f", f"{compound_id}_em.mdp",
+                     "-c", f"{compound_id}_solv.gro", "-p", str(top_file),
+                     "-o", f"{compound_id}_ions.tpr", "-maxwarn", "5"],
+                    workspace,
+                )
+                await loop.run_in_executor(
+                    None, run_subprocess,
+                    ["gmx", "genion", "-s", f"{compound_id}_ions.tpr",
+                     "-o", f"{compound_id}_solv_ions.gro", "-p", str(top_file),
+                     "-pname", "NA", "-nname", "CL", "-neutral", "-conc", "0.15"],
+                    workspace, b"SOL\n",
+                )
+
+                # The ionized box is the input for EM. Record the final
                 # gro_file pointer for resume so the EM stage finds it after
                 # _load_system_state on a retry.
-                gro_file = workspace / f"{compound_id}_solv.gro"
+                gro_file = workspace / f"{compound_id}_solv_ions.gro"
                 _save_system_state(workspace, gro_file, top_file)
 
                 _finalize_stage(workspace, "system_prep")  # copy everything
@@ -769,7 +791,7 @@ async def run_simulation_pipeline(
                 await loop.run_in_executor(
                     None, run_subprocess,
                     ["gmx", "grompp", "-f", f"{compound_id}_em.mdp",
-                     "-c", f"{compound_id}_solv.gro", "-p", str(top_file),
+                     "-c", f"{compound_id}_solv_ions.gro", "-p", str(top_file),
                      "-o", f"{compound_id}_em.tpr", "-maxwarn", "5"],
                     workspace,
                 )

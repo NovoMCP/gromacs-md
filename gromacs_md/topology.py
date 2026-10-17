@@ -259,7 +259,8 @@ def create_ligand_only_topology(workspace: Path, compound_id: str, ligand_itp: P
         if atomtypes_section:
             f.write("; Ligand atom types from ACPYPE/GAFF2\n")
             f.write(atomtypes_section + "\n")
-        f.write('#include "amber99sb-ildn.ff/tip3p.itp"\n\n')
+        f.write('#include "amber99sb-ildn.ff/tip3p.itp"\n')
+        f.write('#include "amber99sb-ildn.ff/ions.itp"\n\n')  # genion's NA/CL
         f.write(f'#include "{ligand_itp.name}"\n\n')
         f.write("[ system ]\n")
         f.write(f"{compound_id}\n\n")

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import List, Optional
 
 import httpx
@@ -21,6 +22,7 @@ import httpx
 from . import metalpdb as mpdb
 from . import opm
 from . import parser
+from .covalent import find_covalent_ligand_links
 from .heuristics import classify_by_donors
 from .models import (
     ClassificationSource,
@@ -33,6 +35,12 @@ from .models import (
 from .pfam import lookup_role
 
 logger = logging.getLogger(__name__)
+
+# The membrane branch (packmol-memgen bilayer) is incomplete: its
+# packmol-memgen call fails on current AmberTools, it drops the ligand, and
+# it has never produced a run. Membrane proteins are refused unless this is
+# set, for working on the branch itself.
+MEMBRANE_BRANCH_ENABLED = os.environ.get("MEMBRANE_BRANCH_ENABLED", "0") == "1"
 
 
 async def classify_structure(
@@ -108,11 +116,27 @@ async def classify_structure(
                 route="refused", reasons=reasons, profile=profile, suggested_branch=None
             )
 
-        if profile.is_membrane:
+        profile.covalent_links = find_covalent_ligand_links(pdb_content)
+        if profile.covalent_links:
             reasons.append(
-                "membrane protein (found in OPM); routing to CHARMM36m "
-                "membrane branch (packmol-memgen bilayer + semi-isotropic NPT)"
+                f"covalent ligand bonded to the protein ({'; '.join(profile.covalent_links[:3])}); "
+                f"the soluble branch would simulate it as a non-bonded ligand"
             )
+            return RoutingDecision(
+                route="refused", reasons=reasons, profile=profile, suggested_branch="covalent_ligand"
+            )
+
+        if profile.is_membrane:
+            if MEMBRANE_BRANCH_ENABLED:
+                reasons.append(
+                    "membrane protein (found in OPM); routing to the membrane "
+                    "branch (packmol-memgen bilayer + semi-isotropic NPT)"
+                )
+            else:
+                reasons.append(
+                    "membrane protein (found in OPM); the membrane branch "
+                    "(lipid bilayer) is not available yet"
+                )
             # Still report metal content below if any, for full audit visibility.
 
         # 4. MetalPDB lookup (only when pdb_id is available and we have metals).
@@ -180,14 +204,16 @@ async def classify_structure(
             has_structural_or_unknown = True
 
     # 6. Final routing.
-    # Membrane proteins route to the membrane branch (CHARMM36m + bilayer).
-    # Metals and other non-trivial features still refuse.
+    # Membrane proteins are refused until the membrane branch works
+    # (MEMBRANE_BRANCH_ENABLED=1 routes them to it for development).
+    # Metals and other non-trivial features refuse.
     if profile.is_membrane:
+        if MEMBRANE_BRANCH_ENABLED:
+            return RoutingDecision(
+                route="run_membrane", reasons=reasons, profile=profile, suggested_branch=None,
+            )
         return RoutingDecision(
-            route="run_membrane",
-            reasons=reasons,
-            profile=profile,
-            suggested_branch=None,  # no longer a suggestion — it's the actual route
+            route="refused", reasons=reasons, profile=profile, suggested_branch="charmm36m_membrane",
         )
 
     if has_catalytic:

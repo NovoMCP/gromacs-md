@@ -17,7 +17,8 @@ from .config import NTOMP
 from .state import AppState
 from .redis_jobs import update_job_status, complete_job, fail_job, refuse_job
 from .s3_storage import upload_results_to_blob
-from .subprocess_utils import run_subprocess
+from .subprocess_utils import run_subprocess, load_mdrun_retries
+from .placement import native_ligand_site, place_ligand, save_placement, load_placement
 from .pdb_handling import (
     clean_pdb_protein_only,
     repair_missing_atoms,
@@ -507,6 +508,11 @@ async def run_simulation_pipeline(
     # Intake classification gate
     # ------------------------------------------------------------------
     route = "run_soluble"  # default for ligand-only (no pdb_content)
+    # The co-crystallized ligand locates the binding site for docking the
+    # ligand's starting pose; read it before cleaning strips HETATM records.
+    native_site = (
+        native_ligand_site(pdb_content) if pdb_content and ligand_smiles and not skip_intake else None
+    )
     if pdb_content and not skip_intake:
         await update_job_status(state, job_id, "processing", {
             "percentage": 2,
@@ -648,9 +654,19 @@ async def run_simulation_pipeline(
                     protein_pdb = workspace / f"{compound_id}_protein.pdb"
                     protein_pdb.write_text(pdb_content)
 
-                    # Generate ligand 3D structure from SMILES
+                    # Ligand starting pose, in the protein's frame: docked into
+                    # the binding site (see placement.py for the fallbacks)
+                    await update_job_status(state, job_id, "processing", {
+                        "percentage": 6, "message": "Docking the ligand for its starting pose",
+                        "step": "placement",
+                    })
                     ligand_pdb = workspace / f"{compound_id}_ligand.pdb"
-                    await loop.run_in_executor(None, smiles_to_pdb, ligand_smiles, ligand_pdb)
+                    placement = await loop.run_in_executor(
+                        None, place_ligand, ligand_smiles, pdb_content, native_site, ligand_pdb
+                    )
+                    save_placement(workspace, placement)
+                    if placement.get("warning"):
+                        logger.warning(f"Job {job_id}: {placement['warning']}")
 
                     await update_job_status(state, job_id, "processing", {
                         "percentage": 8, "message": "Processing protein with GROMACS", "step": "pdb2gmx",
@@ -1055,6 +1071,10 @@ async def run_simulation_pipeline(
                     f"{compound_id}_md.tpr",
                 ],
                 "resumed_from_stages": list(completed_stages) if completed_stages else None,
+                # How the ligand's starting pose was obtained (protein-ligand runs)
+                "ligand_placement": load_placement(workspace),
+                # mdrun stages that failed on the GPU: retried there, or rerun on the CPU
+                "mdrun_retries": load_mdrun_retries(workspace),
             }
 
             # Upload to object storage

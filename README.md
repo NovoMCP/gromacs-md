@@ -80,10 +80,23 @@ export GROMACS_API_KEY=$API_KEY            # if you set API_KEY on the service
 | `MAX_CONCURRENT_SIMS` | `3` | GPU semaphore — concurrent simulations |
 | `NTOMP` | `8` | OpenMP threads per simulation |
 | `REDIS_URL` | `redis://localhost:6379` | job tracking (falls back to in-memory if unavailable) |
+| `AUTODOCK_GPU_URL` | (unset) | [autodock-gpu](https://github.com/NovoMCP/autodock-gpu) endpoint: protein-ligand runs start from the docked pose (see below) |
+| `AUTODOCK_GPU_API_KEY` | (unset) | `X-API-Key` for autodock-gpu, if it requires one |
+| `MDRUN_GPU_RETRIES` | `2` | retries of a failed GPU `mdrun` stage on the GPU |
+| `MDRUN_CPU_FALLBACK` | `1` | after those, rerun the stage once on the CPU; `0` fails the job instead |
+| `MDRUN_CPU_NTOMP` | CPU count | OpenMP threads for that CPU rerun |
 | `MD_RESULTS_BUCKET` | (unset) | S3 bucket for results + checkpoints; results stay local if unset |
 | `AWS_REGION` | `us-east-1` | region for the results bucket |
 
 Redis and S3 are both optional — with neither, the service still runs and keeps results on the local filesystem.
+
+### Protein-ligand starting pose
+
+The ligand from `ligand_smiles` has to start in the binding site, not wherever its SMILES conformer lands. With `AUTODOCK_GPU_URL` set, the service docks the ligand into the protein first, with the box centred on the co-crystallized ligand when the PDB has one, otherwise on autodock-gpu's detected pocket. The MD starts from the top pose. Without docking it centres the ligand on the co-crystallized ligand's site. With neither, the result is flagged as unplaced. The job result's `ligand_placement` records which of these happened (`docked`, `native_site_centroid` or `unplaced`).
+
+### GPU failures
+
+If a GPU `mdrun` stage fails, it is retried on the GPU (`MDRUN_GPU_RETRIES`, default 2). If it still fails, it is rerun once with everything on the CPU. A production run that has written a checkpoint continues from that checkpoint. The job result's `mdrun_retries` lists each retried stage and how it recovered. The CPU rerun is a last resort: 100 ps of NVT on a 60,000-atom system takes about 10 s on the GB10 GPU and about 30 min on its CPU. This guards against an intermittent fault in GROMACS's GPU nonbonded kernel on GB10 (DGX Spark): with larger protein systems, the same input can fail on the GPU with LINCS warnings and then a segfault or CUDA error 700, but runs clean on the CPU.
 
 ## Tests
 

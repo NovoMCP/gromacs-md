@@ -44,3 +44,8 @@ MD_MIN_PER_NS = float(os.environ.get("MD_MIN_PER_NS", "3"))
 # service restarted or crashed) and /status reports it failed.
 JOB_HEARTBEAT_SECONDS = int(os.environ.get("JOB_HEARTBEAT_SECONDS", "60"))
 JOB_STALE_SECONDS = int(os.environ.get("JOB_STALE_SECONDS", "300"))
+
+# Points kept per time series in the job result. The full series go to
+# <compound>_analysis_full.json; a 10 ns run otherwise returns ~590 KB, which
+# MCP clients truncate before reaching the summary sections.
+RESULT_SERIES_MAX_POINTS = int(os.environ.get("RESULT_SERIES_MAX_POINTS", "200"))

@@ -47,6 +47,34 @@ System prep has two sources, chosen per request (`builder`) or by
   in place of residue-name rules, which can't classify lipids or a ligand
   bonded into a protein residue.
 
+### Covalent ligands (`covalent_ligand.py`, `covalent_build.py`)
+
+A structure whose ligand is bonded to a cysteine SG (`LINK`) routes to
+`run_covalent`, and the crystal's ligand is simulated bonded:
+
+1. The ligand's bonds and charges come from its RCSB Chemical Component
+   Dictionary entry, placed on the crystal pose. The entry isn't always the
+   bonded form, so the bond is formed by warhead rule: Michael acceptors
+   (acrylamides) are saturated, nitriles become thioimidates, carbonyls
+   hemithioacetals, a halide leaving group goes, and otherwise the hydrogen the
+   entry drew in place of the sulfur is replaced.
+2. The cysteine and the ligand become one residue, CVX. AM1-BCC charges come
+   from the capped fragment ACE-CYS(adduct)-NME. The backbone keeps ff14SB
+   types and charges, and the rest is GAFF2, with charges shifted so the residue
+   carries the ligand's formal charge. tleap lists the terms between the two
+   that neither force field has (CA-CB, N-CA-CB, ...), and each is taken from
+   GAFF2 with the backbone types read as their GAFF2 equivalents.
+3. The tleap build, energy-parity check and pipeline then run as above. If the
+   start structure clashes too badly for sander to print an energy term
+   (atoms rebuilt by PDBFixer), the comparison is made after a short
+   minimization.
+
+Analysis reports the S-C bond length over the trajectory and skips MM-GBSA (a
+binding free energy doesn't apply to a bonded ligand). Refused: several
+covalent ligands, ligands built from several HET residues (6LU7), bonds to
+residues other than cysteine, and boron warheads. `COVALENT_BRANCH_ENABLED=0`
+refuses every covalent ligand.
+
 tleap is the path for systems pdb2gmx can't build (lipids, covalent adducts).
 Results from the two builders use different protein force fields and aren't
 strictly comparable; each result states `force_field` and `builder`.
@@ -101,6 +129,8 @@ gromacs_md/
   simulation.py          the staged pipeline
   topology.py            pdb2gmx + ligand topology assembly
   amber_build.py         tleap builder, parmed conversion, energy-parity check
+  covalent_ligand.py     bonded form of a covalent ligand (CCD + crystal pose)
+  covalent_build.py      CVX adduct residue: charges, types, junction terms
   analysis.py            RMSD / RMSF / Rg (+ adequacy heuristics)
   manifest.py            durable-job checkpoint schema
   s3_storage.py          results upload

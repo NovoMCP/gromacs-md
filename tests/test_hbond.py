@@ -57,3 +57,12 @@ def test_gro_labels(tmp_path):
     gro.write_text(GRO + "   1.0 1.0 1.0\n")
     labels = _gro_atom_labels(gro)
     assert labels[1] == "ASP25:N" and labels[5] == "MK1901:O1"
+
+
+def test_hbonds_inside_one_residue_are_not_contacts():
+    # a covalent adduct's backbone N to its own ligand carbonyl
+    labels = {1: "CVX481:N", 2: "CVX481:OAC", 3: "MET477:N", 4: "CVX481:N1"}
+    frames = [{(1, 2), (3, 4)}, {(1, 2), (3, 4)}]
+    s = _summarize_hbonds(frames, 2, labels, ligand_atoms={2, 4})
+    assert [b["protein_atom"] for b in s["bonds"]] == ["MET477:N"]
+    assert s["mean_count"] == 1.0

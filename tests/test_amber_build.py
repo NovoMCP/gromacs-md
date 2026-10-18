@@ -220,3 +220,13 @@ def test_decomp_cutoff_uses_the_build_groups(tmp_path):
     # nearest protein atom (CA, 0.1 nm) is 3 Å from the ligand atom (0.4 nm)
     assert analysis._decomp_cutoff_angstrom(gro, groups=groups) == 5.0
     assert analysis._decomp_cutoff_angstrom(gro, groups=(set(), {5})) is None
+
+
+def test_topology_residue_numbers_take_the_pdb_numbers():
+    top = ab._renumber_atoms_sections(TOP, [[394], [1], [395]], [["MET"], ["SOL"], ["BNZ"]])
+    rows = [l.split() for l in top.splitlines() if l.strip() and l.split()[0].isdigit() and len(l.split()) >= 8]
+    assert [r[2] for r in rows if r[3] == "MET"] == ["394", "394", "394"]
+    assert [r[2] for r in rows if r[3] == "BNZ"] == ["395", "395"]
+    assert [r[2] for r in rows if r[3] == "SOL"] == ["1", "1", "1"]
+    with pytest.raises(ab.AmberBuildError, match="out of step"):
+        ab._renumber_atoms_sections(TOP, [[394], [1], [395]], [["ALA"], ["SOL"], ["BNZ"]])

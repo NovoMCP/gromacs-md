@@ -1,0 +1,258 @@
+data_4WI
+# 
+_chem_comp.id                                    4WI 
+_chem_comp.name                                  "(1R,2S,5S)-N-{(1E,2S)-1-imino-3-[(3S)-2-oxopyrrolidin-3-yl]propan-2-yl}-6,6-dimethyl-3-[3-methyl-N-(trifluoroacetyl)-L-valyl]-3-azabicyclo[3.1.0]hexane-2-carboxamide" 
+_chem_comp.type                                  non-polymer 
+_chem_comp.pdbx_type                             HETAIN 
+_chem_comp.formula                               "C23 H34 F3 N5 O4" 
+_chem_comp.mon_nstd_parent_comp_id               ? 
+_chem_comp.pdbx_synonyms                         "PF-07321332, bound form; nirmatrelvir, bound form; Paxlovid, bound form" 
+_chem_comp.pdbx_formal_charge                    0 
+_chem_comp.pdbx_initial_date                     2021-07-15 
+_chem_comp.pdbx_modified_date                    2024-09-27 
+_chem_comp.pdbx_ambiguous_flag                   N 
+_chem_comp.pdbx_release_status                   REL 
+_chem_comp.pdbx_replaced_by                      ? 
+_chem_comp.pdbx_replaces                         9I7 
+_chem_comp.formula_weight                        501.542 
+_chem_comp.one_letter_code                       ? 
+_chem_comp.three_letter_code                     ? 
+_chem_comp.pdbx_model_coordinates_details        ? 
+_chem_comp.pdbx_model_coordinates_missing_flag   N 
+_chem_comp.pdbx_ideal_coordinates_details        Corina 
+_chem_comp.pdbx_ideal_coordinates_missing_flag   N 
+_chem_comp.pdbx_model_coordinates_db_code        7RFS 
+_chem_comp.pdbx_subcomponent_list                ? 
+_chem_comp.pdbx_processing_site                  RCSB 
+_chem_comp.pdbx_pcm                              Y 
+# 
+loop_
+_chem_comp_atom.comp_id 
+_chem_comp_atom.atom_id 
+_chem_comp_atom.alt_atom_id 
+_chem_comp_atom.type_symbol 
+_chem_comp_atom.charge 
+_chem_comp_atom.pdbx_align 
+_chem_comp_atom.pdbx_aromatic_flag 
+_chem_comp_atom.pdbx_leaving_atom_flag 
+_chem_comp_atom.pdbx_stereo_config 
+_chem_comp_atom.pdbx_backbone_atom_flag 
+_chem_comp_atom.pdbx_n_terminal_atom_flag 
+_chem_comp_atom.pdbx_c_terminal_atom_flag 
+_chem_comp_atom.model_Cartn_x 
+_chem_comp_atom.model_Cartn_y 
+_chem_comp_atom.model_Cartn_z 
+_chem_comp_atom.pdbx_model_Cartn_x_ideal 
+_chem_comp_atom.pdbx_model_Cartn_y_ideal 
+_chem_comp_atom.pdbx_model_Cartn_z_ideal 
+_chem_comp_atom.pdbx_component_atom_id 
+_chem_comp_atom.pdbx_component_comp_id 
+_chem_comp_atom.pdbx_ordinal 
+4WI C8  C1  C 0 1 N N N N N N 6.572  1.373  18.105 3.870  2.000  0.928  C8  4WI 1  
+4WI C3  C2  C 0 1 N N N N N N 7.852  -3.217 19.713 5.102  -1.303 -1.708 C3  4WI 2  
+4WI C1  C3  C 0 1 N N N N N N 9.193  -0.664 21.659 2.202  -0.741 -0.548 C1  4WI 3  
+4WI C13 C4  C 0 1 N N N N N N 10.255 2.169  22.026 -1.088 -0.017 0.086  C13 4WI 4  
+4WI C21 C5  C 0 1 N N N N N N 12.250 4.895  22.778 -4.722 0.366  -0.026 C21 4WI 5  
+4WI C6  C6  C 0 1 N N N N N N 5.620  0.469  20.076 5.910  3.171  0.385  C6  4WI 6  
+4WI C7  C7  C 0 1 N N N N N N 5.047  1.849  19.806 5.781  2.894  1.899  C7  4WI 7  
+4WI C10 C8  C 0 1 N N N N N N 11.164 0.893  24.031 -0.365 -2.281 -0.807 C10 4WI 8  
+4WI C5  C9  C 0 1 N N S N N N 6.931  0.492  19.282 4.853  2.207  -0.203 C5  4WI 9  
+4WI C9  C10 C 0 1 N N S N N N 10.609 -0.250 21.925 1.182  -1.094 0.504  C9  4WI 10 
+4WI C11 C11 C 0 1 N N S N N N 11.688 -0.488 24.080 0.315  -3.349 0.076  C11 4WI 11 
+4WI C12 C12 C 0 1 N N R N N N 11.354 -1.196 22.813 1.334  -2.569 0.933  C12 4WI 12 
+4WI C18 C13 C 0 1 N N N N N N 12.815 -1.019 23.214 0.096  -3.280 1.589  C18 4WI 13 
+4WI C19 C14 C 0 1 N N N N N N 13.636 -0.021 22.474 -1.037 -2.391 2.104  C19 4WI 14 
+4WI C20 C15 C 0 1 N N N N N N 13.552 -2.205 23.718 0.362  -4.547 2.405  C20 4WI 15 
+4WI C16 C16 C 0 1 N N N N N N 8.922  5.082  24.062 -1.750 1.983  -1.895 C16 4WI 16 
+4WI C17 C17 C 0 1 N N N N N N 7.919  2.927  23.533 -3.601 0.538  -2.748 C17 4WI 17 
+4WI C23 C18 C 0 1 N N N N N N 8.301  4.608  21.742 -1.239 -0.272 -2.843 C23 4WI 18 
+4WI C4  C19 C 0 1 N N N N N N 7.333  -0.901 18.827 5.501  0.879  -0.599 C4  4WI 19 
+4WI C2  C20 C 0 1 N N S N N N 7.746  -1.749 20.019 4.443  -0.044 -1.206 C2  4WI 20 
+4WI C14 C21 C 0 1 N N S N N N 10.252 3.427  22.860 -2.406 -0.077 -0.642 C14 4WI 21 
+4WI C22 C22 C 0 1 N N N N N N 13.138 5.636  21.809 -5.760 1.132  0.751  C22 4WI 22 
+4WI C15 C23 C 0 1 N N N N N N 8.851  3.997  23.015 -2.249 0.543  -2.032 C15 4WI 23 
+4WI N5  N1  N 0 1 N N N N N N 6.776  -3.940 19.630 4.757  -2.439 -1.231 N5  4WI 24 
+4WI N2  N2  N 0 1 N N N N N N 5.414  2.061  18.429 4.414  2.397  2.092  N2  4WI 25 
+4WI N3  N3  N 0 1 N N N N N N 10.544 1.003  22.693 -0.192 -1.013 -0.059 N3  4WI 26 
+4WI N1  N4  N 0 1 N N N N N N 9.055  -1.335 20.472 3.451  -0.387 -0.183 N1  4WI 27 
+4WI N4  N5  N 0 1 N N N N N N 11.163 4.306  22.150 -3.416 0.668  0.114  N4  4WI 28 
+4WI O1  O1  O 0 1 N N N N N N 7.211  1.469  17.073 2.753  1.546  0.803  O1  4WI 29 
+4WI O2  O2  O 0 1 N N N N N N 8.280  -0.420 22.434 1.900  -0.776 -1.722 O2  4WI 30 
+4WI O3  O3  O 0 1 N N N N N N 9.993  2.178  20.830 -0.834 0.928  0.803  O3  4WI 31 
+4WI O4  O4  O 0 1 N N N N N N 12.481 4.874  23.983 -5.061 -0.523 -0.779 O4  4WI 32 
+4WI F1  F1  F 0 1 N N N N N N 13.131 5.084  20.574 -5.689 2.488  0.414  F1  4WI 33 
+4WI F2  F2  F 0 1 N N N N N N 14.445 5.618  22.161 -7.033 0.641  0.440  F2  4WI 34 
+4WI F3  F3  F 0 1 N N N N N N 12.800 6.947  21.669 -5.524 0.980  2.122  F3  4WI 35 
+4WI H33 H1  H 0 1 N N N N N N 8.821  -3.670 19.562 5.865  -1.246 -2.470 H33 4WI 36 
+4WI H5  H3  H 0 1 N N N N N N 4.947  -0.320 19.709 5.663  4.207  0.156  H5  4WI 37 
+4WI H6  H4  H 0 1 N N N N N N 5.808  0.320  21.149 6.909  2.922  0.026  H6  4WI 38 
+4WI H7  H5  H 0 1 N N N N N N 5.502  2.606  20.462 6.504  2.138  2.207  H7  4WI 39 
+4WI H8  H6  H 0 1 N N N N N N 3.955  1.861  19.935 5.934  3.813  2.465  H8  4WI 40 
+4WI H11 H7  H 0 1 N N N N N N 11.979 1.623  24.144 0.128  -2.220 -1.777 H11 4WI 41 
+4WI H12 H8  H 0 1 N N N N N N 10.416 1.054  24.821 -1.423 -2.509 -0.932 H12 4WI 42 
+4WI H4  H9  H 0 1 N N N N N N 7.733  0.950  19.879 4.358  2.662  -1.061 H4  4WI 43 
+4WI H10 H10 H 0 1 N N N N N N 11.151 -0.102 20.979 1.280  -0.431 1.364  H10 4WI 44 
+4WI H13 H11 H 0 1 N N N N N N 11.501 -1.047 25.009 0.565  -4.303 -0.387 H13 4WI 45 
+4WI H14 H12 H 0 1 N N N N N N 10.946 -2.213 22.905 2.339  -2.933 1.145  H14 4WI 46 
+4WI H23 H13 H 0 1 N N N N N N 14.658 -0.013 22.880 -1.444 -1.807 1.278  H23 4WI 47 
+4WI H24 H14 H 0 1 N N N N N N 13.667 -0.290 21.408 -1.823 -3.014 2.530  H24 4WI 48 
+4WI H25 H15 H 0 1 N N N N N N 13.189 0.978  22.588 -0.652 -1.718 2.869  H25 4WI 49 
+4WI H26 H16 H 0 1 N N N N N N 12.856 -2.873 24.246 1.032  -4.313 3.232  H26 4WI 50 
+4WI H27 H17 H 0 1 N N N N N N 14.005 -2.742 22.872 -0.580 -4.931 2.798  H27 4WI 51 
+4WI H28 H18 H 0 1 N N N N N N 14.342 -1.879 24.410 0.823  -5.301 1.766  H28 4WI 52 
+4WI H17 H19 H 0 1 N N N N N N 9.319  4.663  24.998 -1.639 2.425  -2.885 H17 4WI 53 
+4WI H19 H20 H 0 1 N N N N N N 9.584  5.887  23.711 -2.470 2.563  -1.317 H19 4WI 54 
+4WI H18 H21 H 0 1 N N N N N N 7.915  5.486  24.240 -0.787 1.987  -1.385 H18 4WI 55 
+4WI H20 H22 H 0 1 N N N N N N 8.333  2.495  24.456 -3.957 -0.488 -2.846 H20 4WI 56 
+4WI H21 H23 H 0 1 N N N N N N 6.935  3.370  23.745 -4.321 1.118  -2.171 H21 4WI 57 
+4WI H22 H24 H 0 1 N N N N N N 7.810  2.137  22.775 -3.490 0.979  -3.739 H22 4WI 58 
+4WI H29 H25 H 0 1 N N N N N N 7.289  4.998  21.929 -1.563 -1.311 -2.887 H29 4WI 59 
+4WI H30 H26 H 0 1 N N N N N N 8.956  5.430  21.417 -1.175 0.132  -3.853 H30 4WI 60 
+4WI H31 H27 H 0 1 N N N N N N 8.258  3.840  20.956 -0.261 -0.216 -2.366 H31 4WI 61 
+4WI H2  H28 H 0 1 N N N N N N 6.480  -1.377 18.321 6.286  1.063  -1.333 H2  4WI 62 
+4WI H3  H29 H 0 1 N N N N N N 8.178  -0.824 18.127 5.932  0.407  0.284  H3  4WI 63 
+4WI H32 H30 H 0 1 N N N N N N 7.012  -1.605 20.825 3.950  0.463  -2.034 H32 4WI 64 
+4WI H15 H31 H 0 1 N N N N N N 10.656 3.198  23.857 -2.720 -1.116 -0.741 H15 4WI 65 
+4WI H36 H32 H 0 1 N Y N N N N 6.982  -4.896 19.422 5.182  -3.249 -1.555 H36 4WI 66 
+4WI H9  H35 H 0 1 N N N N N N 4.899  2.632  17.789 3.960  2.361  2.948  H9  4WI 67 
+4WI H1  H36 H 0 1 N N N N N N 9.862  -1.539 19.918 3.692  -0.359 0.756  H1  4WI 68 
+4WI H16 H37 H 0 1 N N N N N N 11.002 4.492  21.181 -3.145 1.379  0.715  H16 4WI 69 
+# 
+loop_
+_chem_comp_bond.comp_id 
+_chem_comp_bond.atom_id_1 
+_chem_comp_bond.atom_id_2 
+_chem_comp_bond.value_order 
+_chem_comp_bond.pdbx_aromatic_flag 
+_chem_comp_bond.pdbx_stereo_config 
+_chem_comp_bond.pdbx_ordinal 
+4WI O1  C8  DOUB N N 1  
+4WI C8  N2  SING N N 2  
+4WI C8  C5  SING N N 3  
+4WI N2  C7  SING N N 4  
+4WI C4  C5  SING N N 5  
+4WI C4  C2  SING N N 6  
+4WI C5  C6  SING N N 7  
+4WI N5  C3  DOUB N N 8  
+4WI C3  C2  SING N N 9  
+4WI C7  C6  SING N N 10 
+4WI C2  N1  SING N N 11 
+4WI N1  C1  SING N N 12 
+4WI F1  C22 SING N N 13 
+4WI O3  C13 DOUB N N 14 
+4WI C1  C9  SING N N 15 
+4WI C1  O2  DOUB N N 16 
+4WI F3  C22 SING N N 17 
+4WI C23 C15 SING N N 18 
+4WI C22 F2  SING N N 19 
+4WI C22 C21 SING N N 20 
+4WI C9  N3  SING N N 21 
+4WI C9  C12 SING N N 22 
+4WI C13 N3  SING N N 23 
+4WI C13 C14 SING N N 24 
+4WI N4  C21 SING N N 25 
+4WI N4  C14 SING N N 26 
+4WI C19 C18 SING N N 27 
+4WI N3  C10 SING N N 28 
+4WI C21 O4  DOUB N N 29 
+4WI C12 C18 SING N N 30 
+4WI C12 C11 SING N N 31 
+4WI C14 C15 SING N N 32 
+4WI C15 C17 SING N N 33 
+4WI C15 C16 SING N N 34 
+4WI C18 C20 SING N N 35 
+4WI C18 C11 SING N N 36 
+4WI C10 C11 SING N N 37 
+4WI C3  H33 SING N N 38 
+4WI C6  H5  SING N N 39 
+4WI C6  H6  SING N N 40 
+4WI C7  H7  SING N N 41 
+4WI C7  H8  SING N N 42 
+4WI C10 H11 SING N N 43 
+4WI C10 H12 SING N N 44 
+4WI C5  H4  SING N N 45 
+4WI C9  H10 SING N N 46 
+4WI C11 H13 SING N N 47 
+4WI C12 H14 SING N N 48 
+4WI C19 H23 SING N N 49 
+4WI C19 H24 SING N N 50 
+4WI C19 H25 SING N N 51 
+4WI C20 H26 SING N N 52 
+4WI C20 H27 SING N N 53 
+4WI C20 H28 SING N N 54 
+4WI C16 H17 SING N N 55 
+4WI C16 H19 SING N N 56 
+4WI C16 H18 SING N N 57 
+4WI C17 H20 SING N N 58 
+4WI C17 H21 SING N N 59 
+4WI C17 H22 SING N N 60 
+4WI C23 H29 SING N N 61 
+4WI C23 H30 SING N N 62 
+4WI C23 H31 SING N N 63 
+4WI C4  H2  SING N N 64 
+4WI C4  H3  SING N N 65 
+4WI C2  H32 SING N N 66 
+4WI C14 H15 SING N N 67 
+4WI N5  H36 SING N N 68 
+4WI N2  H9  SING N N 69 
+4WI N1  H1  SING N N 70 
+4WI N4  H16 SING N N 71 
+# 
+loop_
+_pdbx_chem_comp_descriptor.comp_id 
+_pdbx_chem_comp_descriptor.type 
+_pdbx_chem_comp_descriptor.program 
+_pdbx_chem_comp_descriptor.program_version 
+_pdbx_chem_comp_descriptor.descriptor 
+4WI SMILES           ACDLabs              12.01 "CC1(C)C2C(C(=O)NC(C=N)CC3CCNC3=O)N(CC21)C(=O)C(NC(=O)C(F)(F)F)C(C)(C)C"                                                                                                                                                        
+4WI InChI            InChI                1.03  "InChI=1S/C23H34F3N5O4/c1-21(2,3)16(30-20(35)23(24,25)26)19(34)31-10-13-14(22(13,4)5)15(31)18(33)29-12(9-27)8-11-6-7-28-17(11)32/h9,11-16,27H,6-8,10H2,1-5H3,(H,28,32)(H,29,33)(H,30,35)/b27-9+/t11-,12-,13-,14-,15-,16+/m0/s1" 
+4WI InChIKey         InChI                1.03  WDVIRQQKRMIXGS-XIFHJVQQSA-N                                                                                                                                                                                                     
+4WI SMILES_CANONICAL CACTVS               3.385 "CC(C)(C)[C@H](NC(=O)C(F)(F)F)C(=O)N1C[C@H]2[C@@H]([C@H]1C(=O)N[C@@H](C[C@@H]3CCNC3=O)C=N)C2(C)C"                                                                                                                               
+4WI SMILES           CACTVS               3.385 "CC(C)(C)[CH](NC(=O)C(F)(F)F)C(=O)N1C[CH]2[CH]([CH]1C(=O)N[CH](C[CH]3CCNC3=O)C=N)C2(C)C"                                                                                                                                        
+4WI SMILES_CANONICAL "OpenEye OEToolkits" 2.0.7 "[H]/N=C/[C@H](C[C@@H]1CCNC1=O)NC(=O)[C@@H]2[C@@H]3[C@@H](C3(C)C)CN2C(=O)[C@H](C(C)(C)C)NC(=O)C(F)(F)F"                                                                                                                         
+4WI SMILES           "OpenEye OEToolkits" 2.0.7 "CC1(C2C1C(N(C2)C(=O)C(C(C)(C)C)NC(=O)C(F)(F)F)C(=O)NC(CC3CCNC3=O)C=N)C"                                                                                                                                                        
+# 
+loop_
+_pdbx_chem_comp_identifier.comp_id 
+_pdbx_chem_comp_identifier.type 
+_pdbx_chem_comp_identifier.program 
+_pdbx_chem_comp_identifier.program_version 
+_pdbx_chem_comp_identifier.identifier 
+4WI "SYSTEMATIC NAME" ACDLabs              12.01 "(1R,2S,5S)-N-{(1E,2S)-1-imino-3-[(3S)-2-oxopyrrolidin-3-yl]propan-2-yl}-6,6-dimethyl-3-[3-methyl-N-(trifluoroacetyl)-L-valyl]-3-azabicyclo[3.1.0]hexane-2-carboxamide"                                                               
+4WI "SYSTEMATIC NAME" "OpenEye OEToolkits" 2.0.7 "(1~{R},2~{S},5~{S})-~{N}-[(2~{S})-1-azanylidene-3-[(3~{S})-2-oxidanylidenepyrrolidin-3-yl]propan-2-yl]-3-[(2~{S})-3,3-dimethyl-2-[2,2,2-tris(fluoranyl)ethanoylamino]butanoyl]-6,6-dimethyl-3-azabicyclo[3.1.0]hexane-2-carboxamide" 
+# 
+loop_
+_pdbx_chem_comp_audit.comp_id 
+_pdbx_chem_comp_audit.action_type 
+_pdbx_chem_comp_audit.date 
+_pdbx_chem_comp_audit.processing_site 
+4WI "Create component"   2021-07-15 RCSB 
+4WI "Initial release"    2021-11-10 RCSB 
+4WI "Other modification" 2021-12-14 RCSB 
+4WI "Modify PCM"         2024-09-27 PDBE 
+# 
+loop_
+_pdbx_chem_comp_synonyms.ordinal 
+_pdbx_chem_comp_synonyms.comp_id 
+_pdbx_chem_comp_synonyms.name 
+_pdbx_chem_comp_synonyms.provenance 
+_pdbx_chem_comp_synonyms.type 
+1 4WI "PF-07321332, bound form"  PDB ?                 
+2 4WI "nirmatrelvir, bound form" PDB "drug name"       
+3 4WI "Paxlovid, bound form"     PDB "drug brand name" 
+# 
+loop_
+_pdbx_chem_comp_pcm.pcm_id 
+_pdbx_chem_comp_pcm.comp_id 
+_pdbx_chem_comp_pcm.modified_residue_id 
+_pdbx_chem_comp_pcm.type 
+_pdbx_chem_comp_pcm.category 
+_pdbx_chem_comp_pcm.position 
+_pdbx_chem_comp_pcm.polypeptide_position 
+_pdbx_chem_comp_pcm.comp_id_linking_atom 
+_pdbx_chem_comp_pcm.modified_residue_id_linking_atom 
+_pdbx_chem_comp_pcm.uniprot_specific_ptm_accession 
+_pdbx_chem_comp_pcm.uniprot_generic_ptm_accession 
+1 4WI CYS None "Covalent chemical modification" "Amino-acid side chain" "Any position" C3 SG ? ? 
+2 4WI SER None "Covalent chemical modification" "Amino-acid side chain" "Any position" C3 OG ? ? 
+# 

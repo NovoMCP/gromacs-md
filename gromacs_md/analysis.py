@@ -1075,6 +1075,11 @@ def _grade_adequacy(
                 "grade": "INSUFFICIENT",
                 "reason": "MM-GBSA solvation model is unreliable in the presence of a lipid bilayer.",
             }
+        if route == "run_covalent":
+            return {
+                "grade": "INSUFFICIENT",
+                "reason": "MM-GBSA binding free energy does not apply to a covalently bound ligand.",
+            }
         duration_floor = _duration_floor_for_intent("mm_gbsa")
         rec = _duration_floor_recommendation(duration_floor) if duration_floor else None
         if sim_ns < 10.0:
@@ -1380,6 +1385,36 @@ def _decomp_cutoff_angstrom(
         if nearest_ang <= cutoff - margin_ang:
             return cutoff
     return None
+
+
+# The S-C bond of a cysteine adduct is ~1.8 Å; past this it has come apart,
+# which a correct topology can't do (it's a bond), so it flags a broken build.
+COVALENT_BOND_MAX_ANGSTROM = 2.2
+
+
+def covalent_bond_length(workspace: Path, compound_id: str, atoms: List[int]) -> Dict:
+    """Length of the protein-ligand covalent bond over the production
+    trajectory (atom numbers 1-based), in Å."""
+    out = workspace / f"{compound_id}_covalent_bond.xvg"
+    try:
+        subprocess.run(
+            ["gmx", "distance", "-s", f"{compound_id}_md.tpr", "-f", f"{compound_id}_md.xtc",
+             "-select", f"atomnr {atoms[0]} {atoms[1]}", "-oall", out.name, "-tu", "ns"],
+            check=True, cwd=workspace, capture_output=True,
+        )
+    except subprocess.CalledProcessError as e:
+        return {"error": f"gmx distance failed: {(e.stderr or b'').decode(errors='replace')[-300:]}"}
+    values = [r[1] * 10.0 for r in _parse_xvg(out) if len(r) >= 2]
+    if not values:
+        return {"error": "no frames in the bond-length series"}
+    return {
+        "atoms": atoms,
+        "mean_angstrom": round(sum(values) / len(values), 3),
+        "min_angstrom": round(min(values), 3),
+        "max_angstrom": round(max(values), 3),
+        "intact": max(values) <= COVALENT_BOND_MAX_ANGSTROM,
+        "n_frames": len(values),
+    }
 
 
 def _make_mmgbsa_index(workspace: Path, compound_id: str, gro_file: str):
@@ -1826,6 +1861,11 @@ def _gro_atom_labels(gro_path: Path) -> Dict[int, str]:
 
 def _summarize_hbonds(frames: List[set], n_frames: int, labels: Dict[int, str],
                       ligand_atoms: set) -> Dict[str, Any]:
+    # A ligand bonded into a residue (a covalent adduct) can H-bond to that
+    # residue's own backbone: internal to the adduct, not a contact with the site
+    def residue(atom):
+        return labels.get(atom, str(atom)).split(":")[0]
+    frames = [{p for p in f if residue(p[0]) != residue(p[1])} for f in frames]
     counts = [len(f) for f in frames] + [0] * max(0, n_frames - len(frames))
     total = len(counts)
     if not total:
@@ -1956,6 +1996,7 @@ def analyze_trajectory(
     simulation_ns: Optional[float] = None,
     intent: Optional[str] = None,
     has_protein: Optional[bool] = None,
+    covalent_bond: Optional[List[int]] = None,
 ) -> Dict:
     """Analyze production MD trajectory.
 
@@ -2126,8 +2167,20 @@ def analyze_trajectory(
             except Exception as e:
                 logger.warning(f"Ligand dynamics analysis failed: {e}")
 
+            if covalent_bond:
+                analysis["covalent_bond"] = covalent_bond_length(workspace, compound_id, covalent_bond)
+
             # MM-GBSA — only for soluble (non-membrane) systems
-            if route == "run_membrane":
+            if route == "run_covalent":
+                analysis["mmgbsa"] = {
+                    "skipped": True,
+                    "reason": (
+                        "covalent ligand: a binding free energy from MM-GBSA has no meaning for "
+                        "a ligand bonded to the protein. Use the ligand RMSD, H-bond persistence "
+                        "and covalent bond length for the stability of the complex."
+                    ),
+                }
+            elif route == "run_membrane":
                 analysis["mmgbsa"] = {
                     "skipped": True,
                     "reason": (

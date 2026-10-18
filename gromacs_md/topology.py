@@ -427,8 +427,15 @@ lincs-order             = 6
         f.write(content)
 
 
-def write_md_mdp(workspace: Path, compound_id: str, simulation_ns: float, temperature: float, pressure: float):
+def write_md_mdp(workspace: Path, compound_id: str, simulation_ns: float, temperature: float, pressure: float,
+                 membrane: bool = False):
     nsteps = int(simulation_ns * 500000)
+    # a bilayer's area and thickness relax independently (semi-isotropic), and
+    # Lipid21 is fitted with the long-range dispersion correction
+    pcoupltype = "semiisotropic" if membrane else "isotropic"
+    ref_p = f"{pressure} {pressure}" if membrane else f"{pressure}"
+    compressibility = "4.5e-5 4.5e-5" if membrane else "4.5e-5"
+    dispcorr = "EnerPres" if membrane else "no"
     content = f"""\
 integrator              = md
 nsteps                  = {nsteps}
@@ -446,10 +453,11 @@ tc-grps                 = System
 tau_t                   = 0.1
 ref_t                   = {temperature}
 pcoupl                  = Parrinello-Rahman
-pcoupltype              = isotropic
+pcoupltype              = {pcoupltype}
 tau_p                   = 2.0
-ref_p                   = {pressure}
-compressibility         = 4.5e-5
+ref_p                   = {ref_p}
+compressibility         = {compressibility}
+DispCorr                = {dispcorr}
 nstlist                 = 10
 cutoff-scheme           = Verlet
 ns_type                 = grid
@@ -465,9 +473,61 @@ lincs-order             = 6
         f.write(content)
 
 
-def _fill_mdp_template(template_path: Path, **kwargs) -> str:
-    """Read an .mdp template and fill {placeholder} tokens."""
-    content = template_path.read_text()
-    for key, value in kwargs.items():
-        content = content.replace(f"{{{key}}}", str(value))
-    return content
+# Membrane equilibration (CHARMM-GUI's staged release): position-restraint
+# force constants in kJ/mol/nm² on protein backbone, side chains + ligand, and
+# lipid phosphorus z. NVT, then semi-isotropic NPT; 1.875 ns in all.
+MEMBRANE_STAGES = [
+    # name, NPT, dt (ps), length (ps), backbone, side chain, lipid
+    ("memb1", False, 0.001, 125, 4000, 2000, 1000),
+    ("memb2", False, 0.001, 125, 2000, 1000, 400),
+    ("memb3", True, 0.001, 125, 1000, 500, 400),
+    ("memb4", True, 0.002, 500, 500, 200, 200),
+    ("memb5", True, 0.002, 500, 200, 50, 40),
+    ("memb6", True, 0.002, 500, 50, 0, 0),
+]
+MEMBRANE_NVT_STAGES = [s for s in MEMBRANE_STAGES if not s[1]]
+MEMBRANE_NPT_STAGES = [s for s in MEMBRANE_STAGES if s[1]]
+
+
+def write_membrane_stage_mdp(workspace: Path, compound_id: str, stage, temperature: float,
+                             pressure: float, first: bool) -> Path:
+    """One membrane equilibration stage; `first` generates velocities."""
+    name, npt, dt, length_ps, bb, sc, lipid = stage
+    lines = [
+        "integrator              = md",
+        f"dt                      = {dt}",
+        f"nsteps                  = {int(round(length_ps / dt))}",
+        f"define                  = -DPOSRES -DPOSRES_FC_BB={bb:.1f} -DPOSRES_FC_SC={sc:.1f} "
+        f"-DPOSRES_FC_LIPID={lipid:.1f}",
+        "nstxout                 = 0",
+        "nstvout                 = 0",
+        "nstenergy               = 1000",
+        "nstlog                  = 1000",
+        "tcoupl                  = V-rescale",
+        "tc-grps                 = System",
+        "tau_t                   = 1.0",
+        f"ref_t                   = {temperature}",
+        "nstlist                 = 20",
+        "cutoff-scheme           = Verlet",
+        "coulombtype             = PME",
+        "rcoulomb                = 1.0",
+        "rvdw                    = 1.0",
+        "DispCorr                = EnerPres",
+        "constraints             = h-bonds",
+        "constraint_algorithm    = lincs",
+        "refcoord_scaling        = com",
+    ]
+    if first:
+        lines += ["gen_vel                 = yes", f"gen_temp                = {temperature}",
+                  "gen_seed                = -1", "continuation            = no"]
+    else:
+        lines += ["gen_vel                 = no", "continuation            = yes"]
+    if npt:
+        lines += ["pcoupl                  = C-rescale", "pcoupltype              = semiisotropic",
+                  "tau_p                   = 5.0", f"ref_p                   = {pressure} {pressure}",
+                  "compressibility         = 4.5e-5 4.5e-5"]
+    else:
+        lines += ["pcoupl                  = no"]
+    path = workspace / f"{compound_id}_{name}.mdp"
+    path.write_text("\n".join(lines) + "\n")
+    return path

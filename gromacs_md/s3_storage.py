@@ -30,6 +30,9 @@ logger = logging.getLogger(__name__)
 MD_RESULTS_BUCKET = os.environ.get("MD_RESULTS_BUCKET", "novomcp-md-data")
 MD_RESULTS_PREFIX = os.environ.get("MD_RESULTS_PREFIX", "gromacs-md")
 LOCAL_RESULTS_DIR = os.environ.get("LOCAL_RESULTS_DIR", "")
+# Where LOCAL_RESULTS_DIR is on the host (it's a mounted volume): the path the
+# result reports, since the container's own path means nothing to the user
+RESULTS_HOST_DIR = os.environ.get("RESULTS_HOST_DIR", "")
 
 
 def _result_files(workspace: Path, result: Dict):
@@ -58,7 +61,7 @@ def save_results_locally(workspace: Path, job_id: str, result: Dict,
         logger.warning(f"Could not save results to {dest}: {e}")
         return None
     logger.info(f"Results saved to {dest}")
-    return str(dest)
+    return str(Path(RESULTS_HOST_DIR) / job_id) if RESULTS_HOST_DIR else str(dest)
 
 
 async def upload_results_to_blob(state, workspace: Path, job_id: str, result: Dict) -> Optional[str]:

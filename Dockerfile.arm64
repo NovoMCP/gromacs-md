@@ -124,7 +124,6 @@ COPY run_md_job.py .
 COPY gromacs_md/ ./gromacs_md/
 COPY intake/ ./intake/
 COPY scripts/ ./scripts/
-COPY mdp_templates/ ./mdp_templates/
 
 ENV PORT=8024
 ENV PYTHONUNBUFFERED=1

@@ -8,7 +8,7 @@ Submit a job, get a `job_id` back immediately, and poll for progress — MD runs
 
 - **Protein + ligand, protein-only, or ligand-only** simulations
 - **Ligand parameterization** — SMILES → 3D (RDKit) → GAFF2 topology (ACPYPE, AM1-BCC charges)
-- **Force fields** — AMBER99SB-ILDN (protein) / TIP3P (water) / GAFF2 (ligand); CHARMM36m available for membrane systems
+- **Force fields** — AMBER99SB-ILDN (protein) / TIP3P (water) / GAFF2 (ligand); membrane proteins in a POPC bilayer (ff14SB + Lipid21)
 - **Structure intake classifier** (`intake/`) — routes a PDB to the right pipeline (soluble vs membrane) using RCSB / OPM / MetalPDB / Pfam signals
 - **Metal-site parameterization** hooks (`/metal`) for MCPB.py-style bonded metal models
 - **Durable jobs** — stage checkpoints so a preempted GPU replica resumes instead of restarting

@@ -92,3 +92,19 @@ def test_docking_failure_falls_back(tmp_path, monkeypatch):
     monkeypatch.setattr(placement, "dock_top_pose", boom)
     info = placement.place_ligand("c1ccccc1", "", placement.native_ligand_site(SITE_PDB), tmp_path / "lig.pdb")
     assert info["method"] == "native_site_centroid" and "connection refused" in info["warning"]
+
+
+def test_site_is_the_crystal_ligand_not_a_larger_lipid():
+    # 2RH1: cholesterol (27 heavy atoms here) beside carazolol (4): the docking
+    # box must go on carazolol's site, not the larger membrane lipid's
+    pdb = "\n".join([_het(i, "C", "CLR", 412, 30.0 + i, 0, 0, "C") for i in range(27)]
+                    + [_het(100 + i, "C", "CAU", 500, 0, 0, i, "C") for i in range(4)])
+    site = placement.native_ligand_site(pdb)
+    assert site["resname"] == "CAU"
+
+
+def test_site_prefers_the_het_closest_in_size_to_the_ligand():
+    pdb = "\n".join([_het(i, "C", "AAA", 1, i, 0, 0, "C") for i in range(30)]
+                    + [_het(100 + i, "C", "BBB", 2, 0, i, 0, "C") for i in range(6)])
+    assert placement.native_ligand_site(pdb)["resname"] == "AAA"            # no SMILES: largest
+    assert placement.native_ligand_site(pdb, "c1ccccc1")["resname"] == "BBB"  # benzene: 6 heavy atoms

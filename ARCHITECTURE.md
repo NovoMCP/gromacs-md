@@ -75,6 +75,31 @@ covalent ligands, ligands built from several HET residues (6LU7), bonds to
 residues other than cysteine, and boron warheads. `COVALENT_BRANCH_ENABLED=0`
 refuses every covalent ligand.
 
+### Membrane proteins (`membrane_build.py`)
+
+A protein OPM lists as a membrane protein routes to `run_membrane`
+(`MEMBRANE_BRANCH_ENABLED`):
+
+1. **Orientation.** OPM's file for the PDB ID has the membrane normal along z
+   and the bilayer centre at z = 0. The submitted structure is superposed onto
+   it on matching Cα atoms, so the crystal ligand that locates the docking site
+   moves into the same frame.
+2. **Packing.** packmol-memgen places a POPC bilayer, water and 0.15 M NaCl
+   around the protein and its docked ligand (packing only, 20 all-together loops).
+3. **Build.** tleap with Lipid21 added to the soluble set. Position restraints
+   use force-constant macros: backbone, side chains and ligand, and lipid
+   phosphorus along z only. The energy-parity check runs as for any tleap build.
+4. **Equilibration.** CHARMM-GUI's staged release replaces NVT/NPT: two NVT
+   then four semi-isotropic NPT stages (1.875 ns), with restraints going from
+   4000/2000/1000 to 50/0/0 kJ/mol/nm² (backbone / side chain / lipid z).
+   Production is semi-isotropic with the dispersion correction Lipid21 is
+   fitted with.
+5. **Analysis.** Area per lipid over the run, P-P thickness and leaflet
+   balance, and lipids in contact with the ligand. MM-GBSA is skipped (GB has
+   no membrane term).
+
+Proteins without a PDB ID (uploads) aren't detected as membrane proteins yet.
+
 tleap is the path for systems pdb2gmx can't build (lipids, covalent adducts).
 Results from the two builders use different protein force fields and aren't
 strictly comparable; each result states `force_field` and `builder`.
@@ -114,8 +139,8 @@ live public APIs.
 ## Force-field details
 
 - Protein: AMBER99SB-ILDN (pdb2gmx) or ff14SB (tleap) · Water: TIP3P · Ligand: GAFF2 (AM1-BCC charges)
-- Membrane systems: CHARMM36m (bundled at build time) + semi-isotropic pressure
-  coupling (see `mdp_templates/membrane/`)
+- Membrane systems: ff14SB + Lipid21 (POPC) + TIP3P, semi-isotropic pressure
+  coupling (see "Membrane proteins" above)
 - Thermostat V-rescale · Barostat Parrinello-Rahman · PME electrostatics
 - LINCS on h-bonds (2 fs timestep), Verlet cutoff scheme
 
@@ -138,6 +163,5 @@ gromacs_md/
   redis_jobs.py          engine-compatible job tracking
   config.py              env-driven config
 intake/                  structure classifier (RCSB / OPM / MetalPDB / Pfam)
-mdp_templates/           GROMACS .mdp templates (membrane)
 k8s/                     reference Deployment + Job template
 ```

@@ -44,15 +44,28 @@ _NON_LIGAND_HETATMS = {
     "LDA", "LMT", "BOG", "OGA", "DDR", "C8E", "CYC",
     "GLC", "SUC", "TRE", "MAL", "LAT",
     "DTT", "BME", "MRC", "HED",
+    # lipids, sterols and detergents from membrane-protein crystals: large, so
+    # "largest HETATM" picked 2RH1's cholesterol site over carazolol's pocket
+    "CLR", "CHS", "Y01", "CHD", "PLM", "MYR", "OLA", "OLB", "OLC", "PEE", "POV", "PCW", "LFA",
+    "D10", "D12", "UND", "DMU", "LMU", "UMQ", "BNG", "HTG", "SOG", "12P", "1PE", "P6G", "BU1",
 }
 
 _DOCK_BOX_A = 22.0
 _DOCK_TIMEOUT_S = 600.0
 
 
-def native_ligand_site(pdb_content: str) -> Optional[dict]:
-    """The co-crystallized ligand's site: the largest non-additive HETATM
-    residue by heavy-atom count. Call before HETATM records are stripped."""
+def _heavy_atoms(smiles: Optional[str]) -> Optional[int]:
+    if not smiles:
+        return None
+    from rdkit import Chem
+    mol = Chem.MolFromSmiles(smiles)
+    return mol.GetNumHeavyAtoms() if mol is not None else None
+
+
+def native_ligand_site(pdb_content: str, ligand_smiles: Optional[str] = None) -> Optional[dict]:
+    """The co-crystallized ligand's site: the non-additive HETATM residue
+    closest in heavy-atom count to the submitted ligand (the largest one
+    without a SMILES). Call before HETATM records are stripped."""
     residues: dict = {}
     for line in pdb_content.splitlines():
         if not line.startswith("HETATM") or len(line) < 54:
@@ -69,7 +82,13 @@ def native_ligand_site(pdb_content: str) -> Optional[dict]:
         )
     if not residues:
         return None
-    (chain, resseq, resname), xyz = max(residues.items(), key=lambda kv: len(kv[1]))
+    n_ligand = _heavy_atoms(ligand_smiles)
+    if n_ligand:
+        # closest in size, the larger on a tie
+        (chain, resseq, resname), xyz = min(
+            residues.items(), key=lambda kv: (abs(len(kv[1]) - n_ligand), -len(kv[1])))
+    else:
+        (chain, resseq, resname), xyz = max(residues.items(), key=lambda kv: len(kv[1]))
     center = np.mean(np.array(xyz), axis=0)
     return {
         "resname": resname,

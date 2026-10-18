@@ -26,6 +26,7 @@ router = APIRouter()
 
 
 from ..simulation import run_simulation_pipeline
+from ..amber_build import BUILDERS
 
 
 async def _simulate_with_fetch(
@@ -40,6 +41,7 @@ async def _simulate_with_fetch(
     pressure: float,
     intent: Optional[str] = None,
     adaptive_equilibration: bool = False,
+    builder: Optional[str] = None,
 ):
     """Fetch PDB (if needed) and dispatch to the simulation pipeline.
 
@@ -70,6 +72,7 @@ async def _simulate_with_fetch(
             pdb_id=pdb_id,
             intent=intent,
             adaptive_equilibration=adaptive_equilibration,
+            builder=builder,
         )
     except Exception as e:
         logger.error(f"Job {job_id} failed during fetch/prep: {e}")
@@ -97,6 +100,9 @@ async def submit_simulation(request: MDSimulationRequest, state: AppState = Depe
 
     if request.intent is not None and request.intent not in KNOWN_INTENTS:
         raise HTTPException(status_code=400, detail=f"intent must be one of {sorted(KNOWN_INTENTS)}")
+
+    if request.builder is not None and request.builder not in BUILDERS:
+        raise HTTPException(status_code=400, detail=f"builder must be one of {list(BUILDERS)}")
 
     if request.ligand_smiles:
         try:
@@ -147,6 +153,7 @@ async def submit_simulation(request: MDSimulationRequest, state: AppState = Depe
         pressure=request.pressure,
         intent=request.intent,
         adaptive_equilibration=request.adaptive_equilibration,
+        builder=request.builder,
     ))
 
     return {

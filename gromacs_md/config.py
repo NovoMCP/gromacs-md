@@ -49,3 +49,8 @@ JOB_STALE_SECONDS = int(os.environ.get("JOB_STALE_SECONDS", "300"))
 # <compound>_analysis_full.json; a 10 ns run otherwise returns ~590 KB, which
 # MCP clients truncate before reaching the summary sections.
 RESULT_SERIES_MAX_POINTS = int(os.environ.get("RESULT_SERIES_MAX_POINTS", "200"))
+
+# Topology source for soluble systems: "pdb2gmx" (AMBER99SB-ILDN, ligands
+# through ACPYPE) or "tleap" (ff14SB + GAFF2, see amber_build.py). A request's
+# `builder` overrides it.
+TOPOLOGY_BUILDER = os.environ.get("MD_TOPOLOGY_BUILDER", "pdb2gmx")

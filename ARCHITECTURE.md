@@ -29,6 +29,28 @@ input (PDB and/or SMILES)
 
 Simulation types: **protein + ligand complex**, **protein-only**, **ligand-only**.
 
+### Topology builders
+
+System prep has two sources, chosen per request (`builder`) or by
+`MD_TOPOLOGY_BUILDER` (default `pdb2gmx`):
+
+- **pdb2gmx**: the steps above, AMBER99SB-ILDN.
+- **tleap** (`amber_build.py`): AMBER ff14SB + GAFF2 + TIP3P. Histidine
+  states at pH 7 come from OpenMM, bonded cysteines become CYX, and chain
+  breaks are capped instead of bonded across. tleap solvates (10 Å, cubic) and
+  adds the same ions as genion, and parmed converts the result to GROMACS with
+  heavy-atom `POSRES` blocks per solute molecule. Before any dynamics, a
+  single-point energy from `sander` (AMBER files) and `gmx` (converted files)
+  is compared term by term; a conversion error fails the job instead of
+  silently changing the force field. The build also writes which atoms are
+  protein and which are ligand (`<cid>_build_groups.json`); analysis uses those
+  in place of residue-name rules, which can't classify lipids or a ligand
+  bonded into a protein residue.
+
+tleap is the path for systems pdb2gmx can't build (lipids, covalent adducts).
+Results from the two builders use different protein force fields and aren't
+strictly comparable; each result states `force_field` and `builder`.
+
 ## Async job model
 
 `POST /simulate*` returns a `job_id` immediately and runs the pipeline in the
@@ -63,7 +85,7 @@ live public APIs.
 
 ## Force-field details
 
-- Protein: AMBER99SB-ILDN · Water: TIP3P · Ligand: GAFF2 (AM1-BCC charges)
+- Protein: AMBER99SB-ILDN (pdb2gmx) or ff14SB (tleap) · Water: TIP3P · Ligand: GAFF2 (AM1-BCC charges)
 - Membrane systems: CHARMM36m (bundled at build time) + semi-isotropic pressure
   coupling (see `mdp_templates/membrane/`)
 - Thermostat V-rescale · Barostat Parrinello-Rahman · PME electrostatics
@@ -78,6 +100,7 @@ gromacs_md/
   routes/                simulate, status, health, metal, audit
   simulation.py          the staged pipeline
   topology.py            pdb2gmx + ligand topology assembly
+  amber_build.py         tleap builder, parmed conversion, energy-parity check
   analysis.py            RMSD / RMSF / Rg (+ adequacy heuristics)
   manifest.py            durable-job checkpoint schema
   s3_storage.py          results upload

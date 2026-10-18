@@ -14,7 +14,7 @@ from typing import Callable, Dict, List, Optional
 
 from intake import classify_structure
 
-from .config import NTOMP
+from .config import NTOMP, TOPOLOGY_BUILDER
 from .state import AppState
 from .redis_jobs import update_job_status, complete_job, fail_job, refuse_job, keep_alive, is_job_cancelled
 from .s3_storage import upload_results_to_blob
@@ -41,6 +41,7 @@ from .topology import (
     _fill_mdp_template as fill_mdp_template,
 )
 from .analysis import analyze_trajectory
+from .amber_build import build_for_pipeline, load_build_info
 
 logger = logging.getLogger(__name__)
 
@@ -542,6 +543,72 @@ async def _production_progress(
         await update_job_status(state, job_id, "processing", progress)
 
 
+async def _dock_starting_pose(state: AppState, job_id: str, workspace: Path, ligand_smiles: str,
+                             pdb_content: str, native_site, ligand_pdb: Path) -> None:
+    """Ligand starting pose, in the protein's frame: docked into the binding
+    site (see placement.py for the fallbacks), written to `ligand_pdb`."""
+    await update_job_status(state, job_id, "processing", {
+        "percentage": 6, "message": "Docking the ligand for its starting pose",
+        "step": "placement",
+    })
+    placement = await asyncio.get_event_loop().run_in_executor(
+        None, place_ligand, ligand_smiles, pdb_content, native_site, ligand_pdb
+    )
+    save_placement(workspace, placement)
+    if placement.get("warning"):
+        logger.warning(f"Job {job_id}: {placement['warning']}")
+
+
+async def _box_solvate_ionize(state: AppState, job_id: str, workspace: Path, compound_id: str,
+                              gro_file: Path, top_file: Path) -> None:
+    """Box, water and ions around a pdb2gmx/ACPYPE system, written to
+    <cid>_solv_ions.gro (the tleap builder does this itself)."""
+    loop = asyncio.get_event_loop()
+    # Box
+    await update_job_status(state, job_id, "processing", {
+        "percentage": 10, "message": "Creating simulation box", "step": "editconf",
+    })
+    await loop.run_in_executor(
+        None, run_subprocess,
+        ["gmx", "editconf", "-f", str(gro_file), "-o", f"{compound_id}_box.gro",
+         "-c", "-d", "1.0", "-bt", "cubic"],
+        workspace,
+    )
+
+    # Solvate
+    await update_job_status(state, job_id, "processing", {
+        "percentage": 12, "message": "Solvating system", "step": "solvate",
+    })
+    await loop.run_in_executor(
+        None, run_subprocess,
+        ["gmx", "solvate", "-cp", f"{compound_id}_box.gro", "-cs", "spc216.gro",
+         "-o", f"{compound_id}_solv.gro", "-p", str(top_file)],
+        workspace,
+    )
+
+    # Ions: neutralize, then 0.15 M NaCl. Without them the system
+    # carries the solute's net charge (+8 for T4 lysozyme) under
+    # PME — grompp warns of severe artifacts, hidden by -maxwarn.
+    await update_job_status(state, job_id, "processing", {
+        "percentage": 13, "message": "Adding ions", "step": "genion",
+    })
+    write_em_mdp(workspace, compound_id)
+    await loop.run_in_executor(
+        None, run_subprocess,
+        ["gmx", "grompp", "-f", f"{compound_id}_em.mdp",
+         "-c", f"{compound_id}_solv.gro", "-p", str(top_file),
+         "-o", f"{compound_id}_ions.tpr", "-maxwarn", "5"],
+        workspace,
+    )
+    await loop.run_in_executor(
+        None, run_subprocess,
+        ["gmx", "genion", "-s", f"{compound_id}_ions.tpr",
+         "-o", f"{compound_id}_solv_ions.gro", "-p", str(top_file),
+         "-pname", "NA", "-nname", "CL", "-neutral", "-conc", "0.15"],
+        workspace, b"SOL\n",
+    )
+
+
 async def _run_simulation_pipeline(
     state: AppState,
     job_id: str,
@@ -565,6 +632,9 @@ async def _run_simulation_pipeline(
     # until density plateau is detected, up to a 1ns cap. When False
     # (default), NPT runs the legacy fixed 100ps.
     adaptive_equilibration: bool = False,
+    # Topology source: "pdb2gmx" (amber99sb-ildn, with ACPYPE for a ligand)
+    # or "tleap" (ff14SB, see amber_build.py). None takes TOPOLOGY_BUILDER.
+    builder: Optional[str] = None,
 ):
     """Full simulation pipeline running in background with GPU semaphore.
 
@@ -592,6 +662,7 @@ async def _run_simulation_pipeline(
     """
     loop = asyncio.get_event_loop()
     completed = list(completed_stages or [])
+    builder = builder or TOPOLOGY_BUILDER
 
     # Salts keep their largest component; unsupported elements fail here
     # with a reason instead of deep inside ACPYPE.
@@ -770,25 +841,34 @@ async def _run_simulation_pipeline(
                     "percentage": 5, "message": "Preparing inputs", "step": "preparation",
                 })
 
-                if pdb_content and ligand_smiles:
+                if builder == "tleap":
+                    # tleap builds, solvates and ionizes the whole system
+                    ligand_pdb = None
+                    if ligand_smiles:
+                        ligand_pdb = workspace / f"{compound_id}_ligand.pdb"
+                        if pdb_content:
+                            await _dock_starting_pose(
+                                state, job_id, workspace, ligand_smiles, pdb_content, native_site, ligand_pdb)
+                        else:
+                            await loop.run_in_executor(None, smiles_to_pdb, ligand_smiles, ligand_pdb)
+                    await update_job_status(state, job_id, "processing", {
+                        "percentage": 8, "message": "Building the system with tleap (ff14SB)",
+                        "step": "tleap",
+                    })
+                    gro_file, top_file, _ = await loop.run_in_executor(
+                        None, build_for_pipeline, workspace, compound_id, pdb_content,
+                        ligand_pdb, ligand_smiles,
+                    )
+
+                elif pdb_content and ligand_smiles:
                     # Protein-ligand complex
                     # Use cleaned protein PDB directly (no split needed when pdb_content is pre-cleaned)
                     protein_pdb = workspace / f"{compound_id}_protein.pdb"
                     protein_pdb.write_text(pdb_content)
 
-                    # Ligand starting pose, in the protein's frame: docked into
-                    # the binding site (see placement.py for the fallbacks)
-                    await update_job_status(state, job_id, "processing", {
-                        "percentage": 6, "message": "Docking the ligand for its starting pose",
-                        "step": "placement",
-                    })
                     ligand_pdb = workspace / f"{compound_id}_ligand.pdb"
-                    placement = await loop.run_in_executor(
-                        None, place_ligand, ligand_smiles, pdb_content, native_site, ligand_pdb
-                    )
-                    save_placement(workspace, placement)
-                    if placement.get("warning"):
-                        logger.warning(f"Job {job_id}: {placement['warning']}")
+                    await _dock_starting_pose(
+                        state, job_id, workspace, ligand_smiles, pdb_content, native_site, ligand_pdb)
 
                     await update_job_status(state, job_id, "processing", {
                         "percentage": 8, "message": "Processing protein with GROMACS", "step": "pdb2gmx",
@@ -839,50 +919,8 @@ async def _run_simulation_pipeline(
                 else:
                     raise ValueError("Either pdb_content or ligand_smiles must be provided")
 
-                # --- GROMACS MD pipeline ---
-                # Box
-                await update_job_status(state, job_id, "processing", {
-                    "percentage": 10, "message": "Creating simulation box", "step": "editconf",
-                })
-                await loop.run_in_executor(
-                    None, run_subprocess,
-                    ["gmx", "editconf", "-f", str(gro_file), "-o", f"{compound_id}_box.gro",
-                     "-c", "-d", "1.0", "-bt", "cubic"],
-                    workspace,
-                )
-
-                # Solvate
-                await update_job_status(state, job_id, "processing", {
-                    "percentage": 12, "message": "Solvating system", "step": "solvate",
-                })
-                await loop.run_in_executor(
-                    None, run_subprocess,
-                    ["gmx", "solvate", "-cp", f"{compound_id}_box.gro", "-cs", "spc216.gro",
-                     "-o", f"{compound_id}_solv.gro", "-p", str(top_file)],
-                    workspace,
-                )
-
-                # Ions: neutralize, then 0.15 M NaCl. Without them the system
-                # carries the solute's net charge (+8 for T4 lysozyme) under
-                # PME — grompp warns of severe artifacts, hidden by -maxwarn.
-                await update_job_status(state, job_id, "processing", {
-                    "percentage": 13, "message": "Adding ions", "step": "genion",
-                })
-                write_em_mdp(workspace, compound_id)
-                await loop.run_in_executor(
-                    None, run_subprocess,
-                    ["gmx", "grompp", "-f", f"{compound_id}_em.mdp",
-                     "-c", f"{compound_id}_solv.gro", "-p", str(top_file),
-                     "-o", f"{compound_id}_ions.tpr", "-maxwarn", "5"],
-                    workspace,
-                )
-                await loop.run_in_executor(
-                    None, run_subprocess,
-                    ["gmx", "genion", "-s", f"{compound_id}_ions.tpr",
-                     "-o", f"{compound_id}_solv_ions.gro", "-p", str(top_file),
-                     "-pname", "NA", "-nname", "CL", "-neutral", "-conc", "0.15"],
-                    workspace, b"SOL\n",
-                )
+                if builder != "tleap":
+                    await _box_solvate_ionize(state, job_id, workspace, compound_id, gro_file, top_file)
 
                 # The ionized box is the input for EM. Record the final
                 # gro_file pointer for resume so the EM stage finds it after
@@ -1210,6 +1248,7 @@ async def _run_simulation_pipeline(
                 ),
             )
 
+            build_info = load_build_info(workspace, compound_id)
             # Time series are thinned in the result; the full ones stay on disk
             full_analysis = write_full_analysis(workspace, compound_id, analysis)
             result = {
@@ -1236,7 +1275,12 @@ async def _run_simulation_pipeline(
                 # Changes made to the submitted SMILES (e.g. a salt's counter-ion dropped)
                 "ligand_input_notes": ligand_notes or None,
                 # Changes made to the protein structure (e.g. MSE simulated as MET)
-                "structure_notes": structure_notes or None,
+                "structure_notes": (structure_notes + build_info.get("notes", [])) or None,
+                # Force field and topology builder this system was run with
+                "force_field": build_info["force_field"],
+                "builder": build_info["builder"],
+                "build": {k: build_info[k] for k in ("ions", "disulfides", "energy_parity")
+                          if k in build_info} or None,
             }
 
             # Upload to object storage

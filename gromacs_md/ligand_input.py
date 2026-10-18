@@ -9,6 +9,8 @@ from typing import List, Tuple
 
 from rdkit import Chem
 
+from .protonation import protonate_ph7
+
 # Elements GAFF2 has atom types for
 GAFF2_ELEMENTS = {"H", "C", "N", "O", "S", "P", "F", "Cl", "Br", "I"}
 
@@ -22,7 +24,8 @@ def prepare_ligand_smiles(smiles: str) -> Tuple[str, List[str]]:
 
     A multi-component SMILES (a salt or solvate, e.g. "imatinib mesylate")
     keeps its largest component; the counter-ions and solvent are dropped
-    and listed in the notes.
+    and listed in the notes. A neutral SMILES then gets its pH 7 charge
+    state (protonation.protonate_ph7); one with formal charges is kept.
     """
     mol = Chem.MolFromSmiles(smiles or "")
     if mol is None:
@@ -46,4 +49,5 @@ def prepare_ligand_smiles(smiles: str) -> Tuple[str, List[str]]:
             f"the ligand contains {', '.join(unsupported)}, which GAFF2 has no parameters for "
             f"(supported: {', '.join(sorted(GAFF2_ELEMENTS))})"
         )
-    return Chem.MolToSmiles(mol), notes
+    smiles, charged = protonate_ph7(Chem.MolToSmiles(mol))
+    return smiles, notes + charged

@@ -188,3 +188,54 @@ def test_production_rate_comes_from_mdruns_performance_line(tmp_path):
         "Finished mdrun on rank 0\n")
     assert simulation.production_ns_per_day(log) == 198.765
     assert simulation.production_ns_per_day(tmp_path / "none.log") is None
+
+
+# ---- submission estimate for membrane systems --------------------------------
+
+@pytest.fixture
+def submit_env(mock_state, monkeypatch):
+    async def none(*a, **k):
+        return None
+
+    async def fake_fetch(state, **kwargs):
+        pass
+
+    monkeypatch.setattr(simulate, "measured_min_per_ns", none)
+    monkeypatch.setattr(simulate, "measured_overhead_minutes", none)
+    monkeypatch.setattr(simulate, "_simulate_with_fetch", fake_fetch)
+    return mock_state
+
+
+def _opm(monkeypatch, answer=None, hang=False):
+    async def check(pdb_id, **kwargs):
+        if hang:
+            await __import__("asyncio").sleep(60)
+        return answer, "opm_api", None
+
+    monkeypatch.setattr(simulate.opm, "check_membrane", check)
+
+
+@pytest.mark.asyncio
+async def test_membrane_pdb_gets_the_membrane_estimate_at_submission(submit_env, monkeypatch):
+    _opm(monkeypatch, True)
+    out = await simulate.submit_simulation(MDSimulationRequest(pdb_id="2RH1", simulation_ns=10), submit_env)
+    assert out["estimated_runtime_minutes"] == queue.membrane_runtime_minutes(10, None, None)
+    assert out["estimated_runtime_minutes"] > queue.estimate_runtime_minutes(10, True, False) * 3
+
+
+@pytest.mark.asyncio
+async def test_soluble_or_unknown_pdb_keeps_the_soluble_estimate(submit_env, monkeypatch):
+    soluble = queue.estimate_runtime_minutes(10, True, False)
+    _opm(monkeypatch, False)
+    out = await simulate.submit_simulation(MDSimulationRequest(pdb_id="181L", simulation_ns=10), submit_env)
+    assert out["estimated_runtime_minutes"] == soluble
+
+    _opm(monkeypatch, True, hang=True)  # OPM slow: don't hold up the submission
+    monkeypatch.setattr(simulate, "MEMBRANE_CHECK_TIMEOUT_S", 0.01)
+    out = await simulate.submit_simulation(MDSimulationRequest(pdb_id="2RH1", simulation_ns=10), submit_env)
+    assert out["estimated_runtime_minutes"] == soluble
+
+    _opm(monkeypatch, True)
+    monkeypatch.setattr(simulate.classifier, "MEMBRANE_BRANCH_ENABLED", False)  # refused, not run
+    out = await simulate.submit_simulation(MDSimulationRequest(pdb_id="2RH1", simulation_ns=10), submit_env)
+    assert out["estimated_runtime_minutes"] == soluble

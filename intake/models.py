@@ -24,6 +24,7 @@ FunctionalRole = Literal[
 Route = Literal[
     "run_soluble",       # happy path — no metals, no membrane, no exotic cofactors
     "run_membrane",      # membrane protein — CHARMM36m + packmol-memgen bilayer branch
+    "run_covalent",      # one ligand bonded to a Cys SG — CVX residue, tleap (ff14SB + GAFF2)
     "refused",           # classifier declined the system; see reasons
 ]
 

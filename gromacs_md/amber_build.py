@@ -15,6 +15,7 @@ everything after it run unchanged:
 
 import io
 import json
+import os
 import logging
 import math
 import re
@@ -53,6 +54,11 @@ PARITY_TOLERANCE = {
     "vdw": (5e-3, 5.0),
     "elec": (2e-3, 20.0),
 }
+
+
+# vdW energy per atom above which the start structure has clashes: a solvated
+# protein sits near +0.3 kcal/mol/atom (181L), clashing ones at hundreds
+CLASH_VDW_PER_ATOM = 10.0
 
 
 class AmberBuildError(RuntimeError):
@@ -173,9 +179,12 @@ def prepare_protein(pdb_text: str, gap_A: float = 2.0) -> PreparedProtein:
 # ---------------------------------------------------------------------------
 def _tleap_script(protein_pdb: Optional[Path], disulfides: Sequence[Tuple[int, int]],
                   ligand: Optional[LigandParams], extra_leaprc: Sequence[str] = (),
-                  ions: Optional[Tuple[int, int]] = None, out_prefix: Optional[str] = None) -> str:
+                  ions: Optional[Tuple[int, int]] = None, out_prefix: Optional[str] = None,
+                  extra_params: Sequence[Path] = ()) -> str:
     s = ["source leaprc.protein.ff14SB", "source leaprc.water.tip3p", "source leaprc.gaff2"]
     s += [f"source {rc}" for rc in extra_leaprc]
+    # residue libraries and frcmods, e.g. a covalent adduct residue
+    s += [f"loadoff {p.name}" if p.suffix == ".lib" else f"loadamberparams {p.name}" for p in extra_params]
     parts = []
     if ligand is not None:
         s.append(f"loadamberparams {ligand.frcmod.name}")
@@ -205,7 +214,9 @@ def _leap_errors(log: str) -> List[str]:
     for line in log.splitlines():
         low = line.lower()
         if "fatal" in low or low.startswith("error") or "could not open" in low \
-                or "does not have a type" in low or "created a new atom named" in low:
+                or "does not have a type" in low or "created a new atom named" in low \
+                or "could not find" in low or "could not load" in low \
+                or "parameter file was not saved" in low:
             errs.append(line.strip())
     return errs
 
@@ -243,7 +254,8 @@ def ion_counts(volume_A3: float, net_charge: float,
 
 
 def build_system(workspace: Path, compound_id: str, protein: Optional[PreparedProtein] = None,
-                 ligand: Optional[LigandParams] = None) -> Tuple[Path, Path, Dict]:
+                 ligand: Optional[LigandParams] = None,
+                 extra_params: Sequence[Path] = ()) -> Tuple[Path, Path, Dict]:
     """Solvated, ionized AMBER system: prmtop and inpcrd, and build stats.
 
     tleap runs twice: the first build reads the box volume and net charge,
@@ -255,19 +267,19 @@ def build_system(workspace: Path, compound_id: str, protein: Optional[PreparedPr
     if protein is not None:
         protein_pdb = workspace / f"{compound_id}_protein_amber.pdb"
         protein_pdb.write_text(protein.pdb_text)
-    if ligand is not None:
-        for p in (ligand.mol2, ligand.frcmod):
-            if p.parent != workspace:
-                shutil.copy(p, workspace / p.name)
+    for p in ([ligand.mol2, ligand.frcmod] if ligand is not None else []) + list(extra_params):
+        if p.parent != workspace:
+            shutil.copy(p, workspace / p.name)
 
     disulfides = protein.disulfides if protein else []
-    log = _run_tleap(workspace, _tleap_script(protein_pdb, disulfides, ligand), "leap_probe")
+    log = _run_tleap(workspace, _tleap_script(protein_pdb, disulfides, ligand,
+                                              extra_params=extra_params), "leap_probe")
     volume, charge = _parse_volume_and_charge(log)
     n_na, n_cl = ion_counts(volume, charge)
 
     prefix = f"{compound_id}_amber"
-    _run_tleap(workspace, _tleap_script(protein_pdb, disulfides, ligand,
-                                        ions=(n_na, n_cl), out_prefix=prefix), "leap_build")
+    _run_tleap(workspace, _tleap_script(protein_pdb, disulfides, ligand, ions=(n_na, n_cl),
+                                        out_prefix=prefix, extra_params=extra_params), "leap_build")
     prmtop, inpcrd = workspace / f"{prefix}.prmtop", workspace / f"{prefix}.inpcrd"
     if not prmtop.exists() or prmtop.stat().st_size == 0:
         raise AmberBuildError("tleap wrote no prmtop")
@@ -301,6 +313,47 @@ def _gmx_names(structure) -> None:
         for atom in res.atoms:
             atom.name = _GMX_ATOM.get((old, atom.name), atom.name)
         res.name = _GMX_RESIDUE.get(old, old)
+
+
+_ATOM_RESNR = re.compile(r"(\s*\S+\s+\S+\s+)(\d+)")
+
+
+def _renumber_atoms_sections(top_text: str, numbers: List[List[int]], names: List[List[str]]) -> str:
+    """Set the resnr column of each moleculetype's [ atoms ], the k-th
+    moleculetype taking numbers[k] (by the molecule's own residue index)."""
+    out, k, section = [], -1, None
+    for line in top_text.splitlines():
+        stripped = line.split(";")[0].strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped[1:-1].strip()
+            if section == "moleculetype":
+                k += 1
+        elif section == "atoms" and stripped and not stripped.startswith("#") and 0 <= k < len(numbers):
+            m = _ATOM_RESNR.match(line)  # nr, type, then resnr
+            local, resname = int(m.group(2)) - 1, line.split()[3]
+            if names[k][local] != resname:
+                raise AmberBuildError(f"residue renumbering out of step at {resname} "
+                                      f"(expected {names[k][local]})")
+            line = f"{m.group(1)}{numbers[k][local]:>{len(m.group(2))}}{line[m.end(2):]}"
+        out.append(line)
+    return "\n".join(out) + "\n"
+
+
+def apply_residue_numbers(structure, top: Path, gro: Path) -> None:
+    """Write the residues' own numbers (PDB numbers for the protein, see
+    _renumber) into the .top and .gro. parmed writes each residue's index
+    instead, and GROMACS takes residue numbers from the topology, so without
+    this every label after the build (H-bonds, RMSF, decomposition) would be
+    a sequence position, not the residue the user knows."""
+    molecules = structure.split()  # the order parmed writes the moleculetypes in
+    numbers = [[r.number for r in mol.residues] for mol, _ in molecules]
+    names = [[r.name for r in mol.residues] for mol, _ in molecules]
+    top.write_text(_renumber_atoms_sections(top.read_text(), numbers, names))
+    lines = gro.read_text().splitlines()
+    for i, atom in enumerate(structure.atoms):
+        line = lines[2 + i]
+        lines[2 + i] = f"{atom.residue.number % 100000:5d}{line[5:]}"
+    gro.write_text("\n".join(lines) + "\n")
 
 
 def heavy_atom_posre(atoms_section: Sequence[str], k: int = 1000) -> List[str]:
@@ -363,11 +416,18 @@ def _ranges(indices: Sequence[int]) -> List[List[int]]:
 
 
 def write_build_groups(structure, path: Path, ligand_resnames: Sequence[str] = (),
-                       n_protein_residues: int = 0) -> Dict:
+                       n_protein_residues: int = 0,
+                       adduct: Optional[Tuple[str, Sequence[str]]] = None) -> Dict:
     """Protein and ligand atoms (1-based ranges), from what the build put
-    where, so analysis doesn't classify atoms by residue name."""
+    where, so analysis doesn't classify atoms by residue name. `adduct` is
+    (residue name, ligand atom names) for a ligand bonded into a protein
+    residue: those atoms go to the ligand, the residue's others to the protein."""
     protein, ligand = [], []
     for i, res in enumerate(structure.residues):
+        if adduct is not None and res.name == adduct[0]:
+            for a in res.atoms:
+                (ligand if a.name in adduct[1] else protein).append(a.idx + 1)
+            continue
         idx = [a.idx + 1 for a in res.atoms]
         if i < n_protein_residues:
             protein += idx
@@ -380,7 +440,8 @@ def write_build_groups(structure, path: Path, ligand_resnames: Sequence[str] = (
 
 
 def convert_to_gromacs(workspace: Path, compound_id: str, prmtop: Path, inpcrd: Path,
-                       protein: Optional[PreparedProtein] = None) -> Tuple[Path, Path, Dict]:
+                       protein: Optional[PreparedProtein] = None,
+                       adduct: Optional[Tuple[str, Sequence[str]]] = None) -> Tuple[Path, Path, Dict]:
     """prmtop/inpcrd -> <cid>_solv_ions.gro and <cid>_amber.top (with
     POSRES blocks) and <cid>_build_groups.json."""
     import parmed
@@ -398,8 +459,9 @@ def convert_to_gromacs(workspace: Path, compound_id: str, prmtop: Path, inpcrd: 
     gmx_top.write(str(top))
     top.write_text(add_position_restraints(top.read_text()))
     structure.save(str(gro), format="gro", overwrite=True)
+    apply_residue_numbers(structure, top, gro)
     groups = write_build_groups(structure, workspace / f"{compound_id}_build_groups.json",
-                                ligand_resnames, n_prot)
+                                ligand_resnames, n_prot, adduct)
     return gro, top, groups
 
 
@@ -485,17 +547,19 @@ def _parse_gmx_log(log: str) -> Dict[str, float]:
     return out
 
 
-def check_energy_parity(workspace: Path, compound_id: str, prmtop: Path, inpcrd: Path,
-                        gro: Path, top: Path, cut_A: float = 10.0,
-                        tolerance: Dict[str, Tuple[float, float]] = PARITY_TOLERANCE) -> Dict:
-    """Single-point energy of the AMBER system (sander) and of the converted
-    GROMACS system (gmx), term by term, in kcal/mol. Raises AmberBuildError if
-    a term differs by more than its tolerance: a conversion error is otherwise
-    silent, and the simulation would run on a different force field."""
+def _gmx(cmd: Sequence[str], cwd: Path) -> None:
+    # mdrun refuses an OMP_NUM_THREADS that differs from -ntomp
+    env = {k: v for k, v in os.environ.items() if k != "OMP_NUM_THREADS"}
+    p = subprocess.run(list(cmd), cwd=cwd, capture_output=True, text=True, timeout=1200, env=env)
+    if p.returncode != 0:
+        raise AmberBuildError(f"gmx parity run failed ({cmd[1]}): {p.stderr[-400:]}")
+
+
+def _single_points(pdir: Path, prmtop: Path, inpcrd: Path, gro: Path, top: Path,
+                   cut_A: float) -> Tuple[Dict[str, float], Dict[str, float]]:
+    """(sander, gmx) energy terms at the coordinates of `gro`."""
     import parmed
 
-    pdir = workspace / "parity"
-    pdir.mkdir(exist_ok=True)
     # Both programs evaluate the .gro coordinates: rounded to 0.01 Å there,
     # they shift the bond and angle energies by more than the tolerance
     structure = parmed.load_file(str(prmtop), xyz=str(inpcrd))
@@ -512,20 +576,56 @@ def check_energy_parity(workspace: Path, compound_id: str, prmtop: Path, inpcrd:
     mdout = (pdir / "sp.out").read_text() if (pdir / "sp.out").exists() else ""
     if proc.returncode != 0 or "NSTEP" not in mdout:
         raise AmberBuildError(f"sander single point failed: {(proc.stderr or mdout)[-400:]}")
-    amber = _parse_sander(mdout)
 
     (pdir / "sp.mdp").write_text(_GMX_PARITY_MDP.format(cut_nm=cut_A / 10.0))
-    top_abs = top.resolve()
-    for cmd in (
-        ["gmx", "grompp", "-f", "sp.mdp", "-c", str(gro.resolve()), "-p", str(top_abs),
-         "-o", "sp.tpr", "-maxwarn", "5"],
-        ["gmx", "mdrun", "-s", "sp.tpr", "-deffnm", "sp", "-nb", "cpu", "-pme", "cpu",
-         "-ntmpi", "1", "-ntomp", "4"],
-    ):
-        p = subprocess.run(cmd, cwd=pdir, capture_output=True, text=True, timeout=1200)
-        if p.returncode != 0:
-            raise AmberBuildError(f"gmx parity run failed ({cmd[1]}): {p.stderr[-400:]}")
-    gmx = _parse_gmx_log((pdir / "sp.log").read_text())
+    _gmx(["gmx", "grompp", "-f", "sp.mdp", "-c", str(gro.resolve()), "-p", str(top.resolve()),
+          "-o", "sp.tpr", "-maxwarn", "5"], pdir)
+    _gmx(["gmx", "mdrun", "-s", "sp.tpr", "-deffnm", "sp", "-nb", "cpu", "-pme", "cpu",
+          "-ntmpi", "1", "-ntomp", "4"], pdir)
+    return _parse_sander(mdout), _parse_gmx_log((pdir / "sp.log").read_text())
+
+
+_RELAX_MDP = """\
+integrator = steep
+nsteps     = 2000
+emtol      = 1000
+cutoff-scheme = Verlet
+coulombtype = PME
+rcoulomb   = 1.0
+rvdw       = 1.0
+"""
+
+
+def _relax(pdir: Path, gro: Path, top: Path) -> Path:
+    (pdir / "relax.mdp").write_text(_RELAX_MDP)
+    _gmx(["gmx", "grompp", "-f", "relax.mdp", "-c", str(gro.resolve()), "-p", str(top.resolve()),
+          "-o", "relax.tpr", "-maxwarn", "5"], pdir)
+    _gmx(["gmx", "mdrun", "-s", "relax.tpr", "-deffnm", "relax", "-nb", "cpu", "-pme", "cpu",
+          "-ntmpi", "1", "-ntomp", "4"], pdir)
+    return pdir / "relax.gro"
+
+
+def check_energy_parity(workspace: Path, compound_id: str, prmtop: Path, inpcrd: Path,
+                        gro: Path, top: Path, cut_A: float = 10.0,
+                        tolerance: Dict[str, Tuple[float, float]] = PARITY_TOLERANCE) -> Dict:
+    """Single-point energy of the AMBER system (sander) and of the converted
+    GROMACS system (gmx), term by term, in kcal/mol. Raises AmberBuildError if
+    a term differs by more than its tolerance: a conversion error is otherwise
+    silent, and the simulation would run on a different force field."""
+    pdir = workspace / "parity"
+    pdir.mkdir(exist_ok=True)
+    amber, gmx = _single_points(pdir, prmtop, inpcrd, gro, top, cut_A)
+    relaxed = False
+    n_atoms = int(gro.read_text().splitlines()[1])
+    if set(_SANDER_TERMS) - set(amber) or amber.get("vdw", 0.0) > CLASH_VDW_PER_ATOM * n_atoms:
+        # Atoms rebuilt by PDBFixer can start overlapping: the vdW energy is
+        # then orders of magnitude off (or too large for sander to print), and
+        # a relative tolerance on it means nothing. Minimize briefly with the
+        # converted topology and compare both programs at those coordinates.
+        logger.info("amber_build: start structure clashes; comparing energies after a short minimization")
+        gro = _relax(pdir, gro, top)
+        amber, gmx = _single_points(pdir, prmtop, inpcrd, gro, top, cut_A)
+        relaxed = True
 
     terms, failed = {}, []
     for term, (rel, floor) in tolerance.items():
@@ -538,7 +638,7 @@ def check_energy_parity(workspace: Path, compound_id: str, prmtop: Path, inpcrd:
         terms[term] = {"amber": round(a, 3), "gromacs": round(g, 3), "diff": round(diff, 3), "ok": ok}
         if not ok:
             failed.append(f"{term}: amber {a:.2f} vs gromacs {g:.2f} kcal/mol")
-    result = {"terms": terms, "passed": not failed}
+    result = {"terms": terms, "passed": not failed, "after_minimization": relaxed}
     (workspace / f"{compound_id}_energy_parity.json").write_text(json.dumps(result, indent=1))
     if failed:
         raise AmberBuildError("AMBER -> GROMACS conversion changed the energy: " + "; ".join(failed))

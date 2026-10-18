@@ -22,7 +22,7 @@ import httpx
 from . import metalpdb as mpdb
 from . import opm
 from . import parser
-from .covalent import find_covalent_ligand_links
+from .covalent import covalent_branch_refusal, covalent_ligand_link_records
 from .heuristics import classify_by_donors
 from .modified_residues import unsupported_modified_residues
 from .models import (
@@ -42,6 +42,9 @@ logger = logging.getLogger(__name__)
 # it has never produced a run. Membrane proteins are refused unless this is
 # set, for working on the branch itself.
 MEMBRANE_BRANCH_ENABLED = os.environ.get("MEMBRANE_BRANCH_ENABLED", "0") == "1"
+# Covalent ligands the covalent branch supports (one single-residue ligand on
+# a Cys SG) run there; COVALENT_BRANCH_ENABLED=0 refuses every covalent ligand.
+COVALENT_BRANCH_ENABLED = os.environ.get("COVALENT_BRANCH_ENABLED", "1") == "1"
 
 
 async def classify_structure(
@@ -69,6 +72,7 @@ async def classify_structure(
     """
     profile = SystemProfile(pdb_id=pdb_id)
     reasons: List[str] = []
+    covalent = False  # a supported covalent ligand: run_covalent unless refused below
 
     # 1. Parse the structure locally (CPU-bound — off the event loop).
     loop = asyncio.get_event_loop()
@@ -132,16 +136,25 @@ async def classify_structure(
                 route="refused", reasons=reasons, profile=profile, suggested_branch="modified_residues"
             )
 
-        profile.covalent_links = find_covalent_ligand_links(pdb_content)
-        if profile.covalent_links:
+        links = covalent_ligand_link_records(pdb_content)
+        profile.covalent_links = [link.label() for link in links]
+        if links:
+            unsupported = (covalent_branch_refusal(pdb_content, links) if COVALENT_BRANCH_ENABLED
+                           else "the covalent branch is turned off")
+            if unsupported:
+                reasons.append(
+                    f"covalent ligand bonded to the protein ({'; '.join(profile.covalent_links[:3])}): "
+                    f"{unsupported}. The soluble branch would simulate it as a non-bonded ligand, "
+                    f"so the structure is refused with any ligand; for a non-covalent study use a "
+                    f"structure without the covalent bond (apo, or with a reversible inhibitor)"
+                )
+                return RoutingDecision(
+                    route="refused", reasons=reasons, profile=profile, suggested_branch="covalent_ligand"
+                )
+            covalent = True
             reasons.append(
-                f"covalent ligand bonded to the protein ({'; '.join(profile.covalent_links[:3])}); "
-                f"the soluble branch would simulate it as a non-bonded ligand. The structure "
-                f"is refused with any ligand; for a non-covalent study use a structure "
-                f"without the covalent bond (apo, or with a reversible inhibitor)"
-            )
-            return RoutingDecision(
-                route="refused", reasons=reasons, profile=profile, suggested_branch="covalent_ligand"
+                f"covalent ligand bonded to the protein ({profile.covalent_links[0]}); routing to "
+                f"the covalent branch (ligand and cysteine as one residue, ff14SB + GAFF2)"
             )
 
         if profile.is_membrane:
@@ -226,7 +239,7 @@ async def classify_structure(
     # (MEMBRANE_BRANCH_ENABLED=1 routes them to it for development).
     # Metals and other non-trivial features refuse.
     if profile.is_membrane:
-        if MEMBRANE_BRANCH_ENABLED:
+        if MEMBRANE_BRANCH_ENABLED and not covalent:
             return RoutingDecision(
                 route="run_membrane", reasons=reasons, profile=profile, suggested_branch=None,
             )
@@ -249,6 +262,9 @@ async def classify_structure(
             profile=profile,
             suggested_branch="mcpb_distal",
         )
+
+    if covalent:
+        return RoutingDecision(route="run_covalent", reasons=reasons, profile=profile, suggested_branch=None)
 
     # Happy path — no metals, no membrane, no exotic cofactors.
     reasons.append("no metals, no membrane, no exotic cofactors — happy path")

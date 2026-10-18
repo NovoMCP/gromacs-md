@@ -42,6 +42,8 @@ from .topology import (
 )
 from .analysis import analyze_trajectory
 from .amber_build import build_for_pipeline, load_build_info
+from .covalent_build import build_covalent_for_pipeline, covalent_site, fetch_ccd
+from intake.covalent import covalent_ligand_link_records
 
 logger = logging.getLogger(__name__)
 
@@ -682,6 +684,7 @@ async def _run_simulation_pipeline(
     # NOT complete, re-run intake so pdb2gmx receives the cleaned/repaired
     # PDB even on the retry container.
     skip_intake = "system_prep" in completed
+    covalent: Optional[Dict] = None  # the covalent site, for route run_covalent
 
     # ------------------------------------------------------------------
     # Intake classification gate
@@ -713,9 +716,26 @@ async def _run_simulation_pipeline(
             return
 
         route = decision.route
-        if route not in ("run_soluble", "run_membrane"):
+        if route not in ("run_soluble", "run_membrane", "run_covalent"):
             await refuse_job(state, job_id, decision)
             return
+
+        if route == "run_covalent":
+            # The crystal's bonded ligand is simulated with its cysteine as one
+            # residue, built by tleap; read it before cleaning strips HETATMs
+            try:
+                site = covalent_site(pdb_content, covalent_ligand_link_records(pdb_content)[0])
+                site["ccd"] = await loop.run_in_executor(None, fetch_ccd, site["ligand_code"])
+            except Exception as e:
+                await fail_job(state, job_id, f"covalent ligand: {e}")
+                return
+            covalent = site
+            builder = "tleap"
+            if ligand_smiles:
+                ligand_notes.append(
+                    f"submitted SMILES not used: the crystal's covalently bound {site['ligand_code']} "
+                    f"is simulated")
+                ligand_smiles = None
 
         # Classifier approved. Next steps in order:
         #
@@ -841,7 +861,19 @@ async def _run_simulation_pipeline(
                     "percentage": 5, "message": "Preparing inputs", "step": "preparation",
                 })
 
-                if builder == "tleap":
+                if covalent is not None:
+                    await update_job_status(state, job_id, "processing", {
+                        "percentage": 6,
+                        "message": f"Parameterizing the covalent adduct (CYS {covalent['chain']}"
+                                   f"{covalent['resnum']} + {covalent['ligand_code']}, AM1-BCC)",
+                        "step": "covalent_adduct",
+                    })
+                    gro_file, top_file, _ = await loop.run_in_executor(
+                        None, build_covalent_for_pipeline, workspace, compound_id, pdb_content,
+                        covalent, covalent["ccd"],
+                    )
+
+                elif builder == "tleap":
                     # tleap builds, solvates and ionizes the whole system
                     ligand_pdb = None
                     if ligand_smiles:
@@ -1222,7 +1254,10 @@ async def _run_simulation_pipeline(
             # Analyze
             # Pass ligand + route hints so MM-GBSA + ligand dynamics (Theo P1)
             # can run when appropriate. Membrane systems skip MM-GBSA.
-            has_ligand = bool(ligand_smiles)
+            build_info = load_build_info(workspace, compound_id)
+            # from the build, so a resumed covalent job (intake skipped) keeps it
+            covalent_info = build_info.get("covalent")
+            has_ligand = bool(ligand_smiles) or bool(covalent_info)
             has_protein = bool(pdb_content)
             top_file_name = str(top_file.name) if hasattr(top_file, "name") else str(top_file) if top_file else None
             # MM-GBSA requires a protein-ligand complex — skip for ligand-only
@@ -1241,14 +1276,14 @@ async def _run_simulation_pipeline(
                     compound_id,
                     has_ligand=has_ligand,
                     top_file=top_file_name,
-                    route=route,
+                    route="run_covalent" if covalent_info else route,
                     simulation_ns=simulation_ns,
                     intent=intent,
                     has_protein=_has_protein_for_adequacy,
+                    covalent_bond=covalent_info.get("bond_atoms") if covalent_info else None,
                 ),
             )
 
-            build_info = load_build_info(workspace, compound_id)
             # Time series are thinned in the result; the full ones stay on disk
             full_analysis = write_full_analysis(workspace, compound_id, analysis)
             result = {
@@ -1260,6 +1295,10 @@ async def _run_simulation_pipeline(
                 "pressure": pressure,
                 "analysis": compact_analysis(analysis),
                 "output_files": ([full_analysis] if full_analysis else []) + [
+                    # tleap builds: what was built and the energy-parity record
+                    f.name for f in (workspace / f"{compound_id}_build_info.json",
+                                     workspace / f"{compound_id}_energy_parity.json") if f.exists()
+                ] + [
                     f"{compound_id}_md.xtc",
                     f"{compound_id}_md.gro",
                     f"{compound_id}_md.edr",
@@ -1281,6 +1320,8 @@ async def _run_simulation_pipeline(
                 "builder": build_info["builder"],
                 "build": {k: build_info[k] for k in ("ions", "disulfides", "energy_parity")
                           if k in build_info} or None,
+                # The covalent complex: link, warhead rule, adduct residue
+                "covalent": covalent_info,
             }
 
             # Upload to object storage

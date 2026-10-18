@@ -52,17 +52,69 @@ async def fetch_pdb_from_rcsb(pdb_id: str) -> str:
             return pdb_path.read_text()
 
 
+STANDARD_AA = {
+    'ALA', 'ARG', 'ASN', 'ASP', 'CYS', 'GLN', 'GLU', 'GLY', 'HIS',
+    'ILE', 'LEU', 'LYS', 'MET', 'PHE', 'PRO', 'SER', 'THR', 'TRP',
+    'TYR', 'VAL'
+}
+
+
+def convert_selenomethionine(pdb_content: str) -> tuple[str, int]:
+    """Rewrite MSE residues as MET (Se -> S); returns the PDB and how many."""
+    out, residues = [], set()
+    for line in pdb_content.splitlines(keepends=True):
+        if line.startswith(("ATOM", "HETATM")) and line[17:20] == "MSE":
+            residues.add((line[21], line[22:27]))
+            line = "ATOM  " + line[6:17] + "MET" + line[20:]
+            if line[12:16] == "SE  ":
+                line = line[:12] + " SD " + line[16:]
+            if line[76:78] == "SE":
+                line = line[:76] + " S" + line[78:]
+        elif line.startswith("MODRES") and line[12:15] == "MSE":
+            continue
+        out.append(line)
+    return "".join(out), len(residues)
+
+
+def _residues_inside_chains(pdb_content: str) -> list:
+    """Non-standard residues with standard residues before and after them in
+    the same chain: these are part of the chain, not ligands or waters."""
+    inside = []
+    chain, order = None, []
+    def flush():
+        std = [i for i, (name, _) in enumerate(order) if name in STANDARD_AA]
+        if std:
+            inside.extend(f"{name} {label}" for name, label in order[std[0]:std[-1]]
+                          if name not in STANDARD_AA and name not in ("HOH", "WAT"))
+    for line in pdb_content.splitlines():
+        if line.startswith(("ATOM", "HETATM")):
+            if line[21] != chain:
+                flush()
+                chain, order = line[21], []
+            res = (line[17:20].strip(), f"{line[21]}{line[22:27].strip()}")
+            if not order or order[-1] != res:
+                order.append(res)
+        elif line.startswith("TER"):
+            flush()
+            chain, order = None, []
+    flush()
+    return inside
+
+
 def clean_pdb_protein_only(pdb_content: str) -> str:
     """Clean PDB to protein-only ATOM records.
 
     Strips HETATM (ligands, ions, cofactors, waters), alternate conformations,
-    and non-standard residues.
+    and non-standard residues. Refuses (ValueError) when a non-standard
+    residue sits inside a chain: dropping it would let pdb2gmx bond its
+    neighbours across the gap.
     """
-    STANDARD_AA = {
-        'ALA', 'ARG', 'ASN', 'ASP', 'CYS', 'GLN', 'GLU', 'GLY', 'HIS',
-        'ILE', 'LEU', 'LYS', 'MET', 'PHE', 'PRO', 'SER', 'THR', 'TRP',
-        'TYR', 'VAL'
-    }
+    inside = _residues_inside_chains(pdb_content)
+    if inside:
+        raise ValueError(
+            f"non-standard residues inside the protein chain ({', '.join(inside[:5])}); "
+            f"removing them would join the neighbouring residues across the gap"
+        )
     clean_lines = []
     for line in pdb_content.splitlines(keepends=True):
         if line.startswith("ATOM"):

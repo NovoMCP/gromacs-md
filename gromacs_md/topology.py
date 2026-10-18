@@ -132,6 +132,32 @@ def write_ligand_posre(itp_lines, out_path: Path, k: int = 1000) -> Path:
     return out_path
 
 
+# GAFF/GAFF2 atom type -> atomic number. Types start with their element in
+# lower case (c3, ha, n8, os, ...); chlorine and bromine take two letters.
+_GAFF_ELEMENT = {"cl": 17, "br": 35, "c": 6, "h": 1, "n": 7, "o": 8, "s": 16,
+                 "p": 15, "f": 9, "i": 53}
+
+
+def with_atomic_number(atomtype_line: str) -> str:
+    """Add the atomic number to an ACPYPE [ atomtypes ] line.
+
+    ACPYPE writes `name bond_type mass charge ptype sigma epsilon`, so
+    GROMACS gives the ligand's atoms no element (atomnumber -1) and element-
+    based tools, gmx hbond among them, find no donors or acceptors on it.
+    """
+    body, sep, comment = atomtype_line.rstrip("\n").partition(";")
+    fields = body.split()
+    if len(fields) != 7 or fields[4] not in ("A", "S", "V", "D"):
+        return atomtype_line
+    name = fields[0].lower()
+    number = _GAFF_ELEMENT.get(name[:2]) or _GAFF_ELEMENT.get(name[:1])
+    if number is None:
+        return atomtype_line
+    out = (f" {fields[0]:<8} {fields[1]:<8} {number:>3}  {fields[2]}  {fields[3]}   "
+           f"{fields[4]}     {fields[5]}   {fields[6]}")
+    return out + (f" {sep}{comment}" if sep else "") + "\n"
+
+
 def combine_protein_ligand(
     workspace: Path,
     compound_id: str,
@@ -180,7 +206,7 @@ def combine_protein_ligand(
             in_atomtypes = False
             cleaned_itp_lines.append(line)
         elif in_atomtypes:
-            atomtypes_section += line
+            atomtypes_section += with_atomic_number(line)
         else:
             cleaned_itp_lines.append(line)
 
@@ -260,7 +286,7 @@ def create_ligand_only_topology(workspace: Path, compound_id: str, ligand_itp: P
             in_atomtypes = False
             cleaned_itp_lines.append(line)
         elif in_atomtypes:
-            atomtypes_section += line
+            atomtypes_section += with_atomic_number(line)
         else:
             cleaned_itp_lines.append(line)
 

@@ -91,7 +91,10 @@ async def startup():
         state.blob = client
         logger.info(f"Connected to S3 (bucket: {bucket})")
     except Exception as e:
-        logger.warning(f"S3 not available: {e}. Results stored locally only.")
+        where = os.environ.get("LOCAL_RESULTS_DIR")
+        logger.warning(f"S3 not available: {e}. " + (
+            f"Results are saved under {where}." if where else
+            "Set LOCAL_RESULTS_DIR to keep output files; they are deleted with the workspace."))
         state.blob = None
 
     if not API_KEY:

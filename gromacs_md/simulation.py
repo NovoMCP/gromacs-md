@@ -20,11 +20,12 @@ from .redis_jobs import update_job_status, complete_job, fail_job, refuse_job, k
 from .s3_storage import upload_results_to_blob
 from .subprocess_utils import run_subprocess, load_mdrun_retries, without_nsteps, is_cancelled, forget_cancelled
 from .ligand_input import LigandInputError, prepare_ligand_smiles
-from .queue import record_min_per_ns, system_kind
+from .queue import overhead_kind, record_min_per_ns, record_overhead_minutes, system_kind
 from .result_compact import compact_analysis, write_full_analysis
 from .placement import native_ligand_site, place_ligand, save_placement, load_placement
 from .pdb_handling import (
     clean_pdb_protein_only,
+    convert_selenomethionine,
     repair_missing_atoms,
     smiles_to_pdb,
 )
@@ -595,6 +596,7 @@ async def _run_simulation_pipeline(
     # Salts keep their largest component; unsupported elements fail here
     # with a reason instead of deep inside ACPYPE.
     ligand_notes: List[str] = []
+    structure_notes: List[str] = []  # changes made to the protein, e.g. MSE -> MET
     if ligand_smiles:
         try:
             ligand_smiles, ligand_notes = prepare_ligand_smiles(ligand_smiles)
@@ -660,6 +662,9 @@ async def _run_simulation_pipeline(
             "message": "Repairing missing sidechain atoms (PDBFixer)",
             "step": "repair",
         })
+        pdb_content, n_mse = convert_selenomethionine(pdb_content)
+        if n_mse:
+            structure_notes.append(f"{n_mse} selenomethionine (MSE) residues simulated as methionine")
         repaired_pdb, repair_stats = await loop.run_in_executor(
             None, repair_missing_atoms, pdb_content
         )
@@ -683,7 +688,12 @@ async def _run_simulation_pipeline(
                 })
             pdb_content = repaired_pdb
 
-        pdb_content = clean_pdb_protein_only(pdb_content)
+        try:
+            pdb_content = clean_pdb_protein_only(pdb_content)
+        except ValueError as e:
+            logger.warning(f"Job {job_id}: {e}")
+            await fail_job(state, job_id, str(e))
+            return
 
     # ------------------------------------------------------------------
     # Membrane branch — separate pipeline (packmol-memgen + CHARMM36m)
@@ -705,6 +715,8 @@ async def _run_simulation_pipeline(
 
     async with state.gpu_sem:
         logger.info(f"Job {job_id}: Acquired GPU semaphore, starting simulation")
+        started = time.monotonic()
+        production_seconds: Optional[float] = None  # set when production runs in this call
         if await is_job_cancelled(state, job_id):
             logger.info(f"Job {job_id}: cancelled while queued")
             return
@@ -1137,8 +1149,10 @@ async def _run_simulation_pipeline(
                     state, job_id, workspace / f"{compound_id}_md.log", simulation_ns,
                     kind=system_kind(bool(pdb_content)),
                 ))
+                production_started = time.monotonic()
                 try:
                     await loop.run_in_executor(None, run_subprocess, mdrun_cmd, workspace)
+                    production_seconds = time.monotonic() - production_started
                 finally:
                     for task in (cpt_task, progress_task):
                         if task is not None:
@@ -1221,6 +1235,8 @@ async def _run_simulation_pipeline(
                 "mdrun_retries": load_mdrun_retries(workspace),
                 # Changes made to the submitted SMILES (e.g. a salt's counter-ion dropped)
                 "ligand_input_notes": ligand_notes or None,
+                # Changes made to the protein structure (e.g. MSE simulated as MET)
+                "structure_notes": structure_notes or None,
             }
 
             # Upload to object storage
@@ -1231,21 +1247,31 @@ async def _run_simulation_pipeline(
             if output_location:
                 result["output_location"] = output_location
 
+            # this host's time outside production, for later runtime estimates
+            if production_seconds is not None and not completed_stages:
+                overhead = (time.monotonic() - started - production_seconds) / 60
+                await record_overhead_minutes(
+                    state, overhead_kind(bool(pdb_content), has_ligand), overhead)
+
             # Mark complete
             await complete_job(state, job_id, result)
 
-        except subprocess.CalledProcessError as e:
-            stderr = ""
-            if e.stderr:
-                stderr = e.stderr if isinstance(e.stderr, str) else e.stderr.decode(errors="replace")
-            error_msg = f"{e}\nstderr: {stderr}" if stderr else str(e)
-            logger.error(f"Job {job_id} failed: {error_msg}")
-            await fail_job(state, job_id, error_msg)
-            clean_workspace_on_success = False
         except Exception as e:
-            logger.error(f"Job {job_id} failed: {e}", exc_info=True)
-            await fail_job(state, job_id, str(e))
-            clean_workspace_on_success = False
+            if is_cancelled(workspace):
+                # the cancel killed the running step; that is the expected exit
+                logger.info(f"Job {job_id}: stopped by cancel ({type(e).__name__})")
+            elif isinstance(e, subprocess.CalledProcessError):
+                stderr = ""
+                if e.stderr:
+                    stderr = e.stderr if isinstance(e.stderr, str) else e.stderr.decode(errors="replace")
+                error_msg = f"{e}\nstderr: {stderr}" if stderr else str(e)
+                logger.error(f"Job {job_id} failed: {error_msg}")
+                await fail_job(state, job_id, error_msg)
+                clean_workspace_on_success = False
+            else:
+                logger.error(f"Job {job_id} failed: {e}", exc_info=True)
+                await fail_job(state, job_id, str(e))
+                clean_workspace_on_success = False
 
         state.job_workspaces.pop(job_id, None)
         if is_cancelled(workspace):

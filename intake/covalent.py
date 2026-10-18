@@ -46,15 +46,20 @@ def _side(line: str, start: int) -> tuple[str, str, str, str]:
 
 
 def find_covalent_ligand_links(pdb_content: str) -> List[str]:
-    """LINK records joining a ligand residue to a standard amino acid."""
+    """LINK records joining a ligand residue to a standard amino acid.
+
+    Modified residues listed in MODRES (a phosphoserine, say) are part of the
+    chain: their peptide-bond LINKs are not ligand links.
+    """
     found: List[str] = []
+    in_chain = {line[12:15].strip() for line in pdb_content.splitlines() if line.startswith("MODRES")}
     for line in pdb_content.splitlines():
         if not line.startswith("LINK"):
             continue
         a, b = _side(line, 12), _side(line, 42)
         for lig, res in ((a, b), (b, a)):
             name = lig[1]
-            if res[1] in STANDARD_AA and name not in STANDARD_AA | WATER | SUGARS | MODIFICATIONS | IONS:
+            if res[1] in STANDARD_AA and name not in STANDARD_AA | WATER | SUGARS | MODIFICATIONS | IONS | in_chain:
                 dist = line[73:78].strip()
                 found.append(
                     f"{name} {lig[2]}{lig[3]} {lig[0]} - {res[1]} {res[2]}{res[3]} {res[0]}"

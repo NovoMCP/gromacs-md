@@ -24,6 +24,7 @@ from . import opm
 from . import parser
 from .covalent import find_covalent_ligand_links
 from .heuristics import classify_by_donors
+from .modified_residues import unsupported_modified_residues
 from .models import (
     ClassificationSource,
     FunctionalRole,
@@ -116,11 +117,28 @@ async def classify_structure(
                 route="refused", reasons=reasons, profile=profile, suggested_branch=None
             )
 
+        modified = unsupported_modified_residues(pdb_content)
+        profile.ptm_residues = [r.label() for r in modified]
+        if modified:
+            shown = "; ".join(profile.ptm_residues[:4])
+            more = f" and {len(modified) - 4} more" if len(modified) > 4 else ""
+            reasons.append(
+                f"modified residues in the protein chain ({shown}{more}); the force "
+                f"field has no parameters for them, and dropping them would join the "
+                f"neighbouring residues across the gap. The structure is refused with "
+                f"any ligand; use one without these modifications"
+            )
+            return RoutingDecision(
+                route="refused", reasons=reasons, profile=profile, suggested_branch="modified_residues"
+            )
+
         profile.covalent_links = find_covalent_ligand_links(pdb_content)
         if profile.covalent_links:
             reasons.append(
                 f"covalent ligand bonded to the protein ({'; '.join(profile.covalent_links[:3])}); "
-                f"the soluble branch would simulate it as a non-bonded ligand"
+                f"the soluble branch would simulate it as a non-bonded ligand. The structure "
+                f"is refused with any ligand; for a non-covalent study use a structure "
+                f"without the covalent bond (apo, or with a reversible inhibitor)"
             )
             return RoutingDecision(
                 route="refused", reasons=reasons, profile=profile, suggested_branch="covalent_ligand"

@@ -17,6 +17,9 @@ class MDSimulationRequest(BaseModel):
     intent: Optional[str] = None
     # Extend NPT in 100 ps chunks until the density plateaus (up to 1 ns)
     adaptive_equilibration: bool = False
+    # Topology builder: "pdb2gmx" (AMBER99SB-ILDN) or "tleap" (ff14SB).
+    # Unset, the service's MD_TOPOLOGY_BUILDER applies.
+    builder: Optional[str] = None
 
 
 class LigandPreparationRequest(BaseModel):

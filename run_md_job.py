@@ -371,6 +371,7 @@ async def main_async() -> int:
     ligand_smiles = config.get("ligand_smiles")
     intent = config.get("intent")  # scientific intent for v3 quality grading
     adaptive_equilibration = bool(config.get("adaptive_equilibration", False))
+    builder = config.get("builder")  # topology builder; None = MD_TOPOLOGY_BUILDER
 
     _structured(
         "job_started",
@@ -563,6 +564,7 @@ async def main_async() -> int:
             production_cpt_callback=_production_cpt_cb,
             intent=intent,
             adaptive_equilibration=adaptive_equilibration,
+            builder=builder,
         )
     except Exception as e:
         logger.exception(f"Pipeline execution raised: {e}")

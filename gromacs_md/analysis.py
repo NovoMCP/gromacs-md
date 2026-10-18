@@ -7,6 +7,7 @@ Quality gate functions (May 2026):
   assess_md_quality()       — aggregate pass/conditional/fail gate
 """
 
+import json
 import logging
 import re
 import shutil
@@ -1286,10 +1287,41 @@ _STANDARD_AA = {
 _SOLVENT = {"SOL", "HOH", "WAT", "TIP", "TP3", "T3P", "SPC", "NA", "CL", "K", "MG", "CA", "ZN"}
 
 
+def _build_groups(workspace: Path, compound_id: str):
+    """(protein, ligand) atom numbers (1-based sets) that the tleap build
+    recorded in <cid>_build_groups.json, or None for a pdb2gmx system.
+
+    A built system says which atoms are what; residue names can't, once
+    lipids or a ligand bonded into a protein residue are in the system.
+    """
+    path = workspace / f"{compound_id}_build_groups.json"
+    if not path.exists():
+        return None
+    try:
+        groups = json.loads(path.read_text())
+        expand = lambda ranges: {i for a, b in ranges for i in range(a, b + 1)}
+        return expand(groups.get("protein", [])), expand(groups.get("ligand", []))
+    except (ValueError, TypeError) as e:
+        logger.warning(f"{path.name} unreadable ({e}); classifying atoms by residue name")
+        return None
+
+
+def _atom_kind(index: int, resname: str, groups) -> Optional[str]:
+    """'protein', 'ligand' or None (solvent, ions, lipids) for atom `index`
+    (1-based): from the build's groups when there are any, else by residue name."""
+    if groups is not None:
+        protein, ligand = groups
+        return "protein" if index in protein else "ligand" if index in ligand else None
+    if resname in _STANDARD_AA:
+        return "protein"
+    return None if resname in _SOLVENT else "ligand"
+
+
 def _decomp_cutoff_angstrom(
     gro_path: Path,
     candidates=(5.0, 6.0, 8.0, 10.0),
     margin_ang: float = 1.0,
+    groups=None,
 ) -> Optional[float]:
     """Smallest 'within X Å' cutoff that is guaranteed to select ≥1 residue.
 
@@ -1320,19 +1352,17 @@ def _decomp_cutoff_angstrom(
     #                     x[20:28] y[28:36] z[36:44]  (nm, %8.3f default)
     protein_res: Dict[str, List[tuple]] = {}
     ligand_xyz: List[tuple] = []
-    for line in lines[2 : 2 + n_atoms]:
+    for i, line in enumerate(lines[2 : 2 + n_atoms], start=1):
         if len(line) < 44:
             continue
-        resname = line[5:10].strip()
         try:
             xyz = (float(line[20:28]), float(line[28:36]), float(line[36:44]))
         except ValueError:
             continue
-        if resname in _STANDARD_AA:
+        kind = _atom_kind(i, line[5:10].strip(), groups)
+        if kind == "protein":
             protein_res.setdefault(line[0:5].strip(), []).append(xyz)
-        elif resname in _SOLVENT:
-            continue
-        else:
+        elif kind == "ligand":
             ligand_xyz.append(xyz)
 
     if not protein_res or not ligand_xyz:
@@ -1366,9 +1396,7 @@ def _make_mmgbsa_index(workspace: Path, compound_id: str, gro_file: str):
 
     Returns (ndx_path, protein_group_idx, ligand_group_idx) or None.
     """
-    STANDARD_AA = _STANDARD_AA
-    SOLVENT = _SOLVENT
-
+    groups = _build_groups(workspace, compound_id)
     gro_path = workspace / gro_file
     if not gro_path.exists():
         available = [f.name for f in workspace.iterdir() if f.suffix in ('.gro', '.tpr', '.xtc')]
@@ -1393,11 +1421,10 @@ def _make_mmgbsa_index(workspace: Path, compound_id: str, gro_file: str):
             continue
         resname = line[5:10].strip()
         system_atoms.append(i)
-        if resname in STANDARD_AA:
+        kind = _atom_kind(i, resname, groups)  # solvent and ions stay out of the named groups
+        if kind == "protein":
             protein_atoms.append(i)
-        elif resname in SOLVENT:
-            pass  # skip solvent/ions from named groups
-        else:
+        elif kind == "ligand":
             ligand_atoms.append(i)
             if ligand_resname is None:
                 ligand_resname = resname
@@ -1574,7 +1601,7 @@ def run_mmgbsa_analysis(
     # geometry. If the ligand isn't in contact with the protein (no residue
     # within range), run plain MM-GBSA without &decomp — feeding gmx_MMPBSA an
     # empty "within X" selection makes it crash on list2range('')['string'].
-    decomp_cutoff = _decomp_cutoff_angstrom(md_gro_path)
+    decomp_cutoff = _decomp_cutoff_angstrom(md_gro_path, groups=_build_groups(workspace, compound_id))
     decomp_enabled = decomp_cutoff is not None
     interval = _mmgbsa_interval(_md_frame_count(workspace, compound_id))
     if decomp_enabled:

@@ -37,11 +37,8 @@ from .pfam import lookup_role
 
 logger = logging.getLogger(__name__)
 
-# The membrane branch (packmol-memgen bilayer) is incomplete: its
-# packmol-memgen call fails on current AmberTools, it drops the ligand, and
-# it has never produced a run. Membrane proteins are refused unless this is
-# set, for working on the branch itself.
-MEMBRANE_BRANCH_ENABLED = os.environ.get("MEMBRANE_BRANCH_ENABLED", "0") == "1"
+# Membrane proteins (OPM) run in a POPC bilayer; MEMBRANE_BRANCH_ENABLED=0 refuses them.
+MEMBRANE_BRANCH_ENABLED = os.environ.get("MEMBRANE_BRANCH_ENABLED", "1") == "1"
 # Covalent ligands the covalent branch supports (one single-residue ligand on
 # a Cys SG) run there; COVALENT_BRANCH_ENABLED=0 refuses every covalent ligand.
 COVALENT_BRANCH_ENABLED = os.environ.get("COVALENT_BRANCH_ENABLED", "1") == "1"
@@ -235,8 +232,7 @@ async def classify_structure(
             has_structural_or_unknown = True
 
     # 6. Final routing.
-    # Membrane proteins are refused until the membrane branch works
-    # (MEMBRANE_BRANCH_ENABLED=1 routes them to it for development).
+    # Membrane proteins run in the membrane branch (MEMBRANE_BRANCH_ENABLED=0 refuses them).
     # Metals and other non-trivial features refuse.
     if profile.is_membrane:
         if MEMBRANE_BRANCH_ENABLED and not covalent:

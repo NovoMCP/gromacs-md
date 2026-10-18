@@ -134,8 +134,6 @@ COPY intake/ ./intake/
 # Integration test script (scripts/test_intake.py) — optional but useful
 # for in-container smoke verification against live APIs.
 COPY scripts/ ./scripts/
-# Membrane MD equilibration templates (semi-isotropic, CHARMM36m, doc 11).
-COPY mdp_templates/ ./mdp_templates/
 
 # Environment variables
 ENV PORT=8024

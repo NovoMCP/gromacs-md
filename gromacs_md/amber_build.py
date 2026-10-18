@@ -356,27 +356,63 @@ def apply_residue_numbers(structure, top: Path, gro: Path) -> None:
     gro.write_text("\n".join(lines) + "\n")
 
 
-def heavy_atom_posre(atoms_section: Sequence[str], k: int = 1000) -> List[str]:
-    """[ position_restraints ] on the heavy atoms of one [ atoms ] section."""
+# Lipid21 residues (a phospholipid is head + two tails, e.g. POPC = PA PC OL)
+LIPID_RESIDUES = {"PA", "PC", "OL", "PE", "PS", "PGR", "PGS", "PH-", "SA", "ST", "LA", "MY",
+                  "DHA", "AR", "CHL", "SPM"}
+BACKBONE_ATOMS = {"N", "CA", "C", "O"}
+# amino acids as tleap names them (protonation variants, CYX, the CVX adduct)
+AMINO_ACIDS = {"ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE", "LEU", "LYS",
+               "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL", "HIE", "HID", "HIP", "CYX",
+               "CYM", "ASH", "GLH", "LYN", "CVX"}
+
+# Force constants (kJ/mol/nm²) are macros so each equilibration stage can set
+# them with `define = -DPOSRES -DPOSRES_FC_BB=...`; unset, they are the 1000
+# that pdb2gmx and the ligand step use on the soluble branch.
+POSRES_DEFAULTS = """\
+; position-restraint force constants, set per equilibration stage via define
+#ifndef POSRES_FC_BB
+#define POSRES_FC_BB 1000.0
+#endif
+#ifndef POSRES_FC_SC
+#define POSRES_FC_SC 1000.0
+#endif
+#ifndef POSRES_FC_LIPID
+#define POSRES_FC_LIPID 1000.0
+#endif
+"""
+
+
+def solute_posre(atoms_section: Sequence[str]) -> List[str]:
+    """[ position_restraints ] for one moleculetype's [ atoms ]: backbone
+    heavy atoms at POSRES_FC_BB, other heavy atoms (side chains, ligands) at
+    POSRES_FC_SC, and a lipid's phosphorus along z only at POSRES_FC_LIPID,
+    which keeps the leaflets flat while the lipids move in the plane."""
     out = ["[ position_restraints ]", ";  ai  funct    fcx    fcy    fcz"]
     for line in atoms_section:
         fields = line.split(";")[0].split()
         if len(fields) < 8:
             continue
-        if float(fields[7]) >= 1.5:  # not hydrogen
-            out.append(f"{int(fields[0]):6d}      1   {k}   {k}   {k}")
+        nr, resname, name, heavy = int(fields[0]), fields[3], fields[4], float(fields[7]) >= 1.5
+        if resname in LIPID_RESIDUES:
+            if 30.0 < float(fields[7]) < 32.0:  # phosphorus (Lipid21 calls it P31)
+                out.append(f"{nr:6d}      1   0   0   POSRES_FC_LIPID")
+        elif name in BACKBONE_ATOMS and resname in AMINO_ACIDS:
+            out.append(f"{nr:6d}      1   POSRES_FC_BB   POSRES_FC_BB   POSRES_FC_BB")
+        elif heavy:
+            out.append(f"{nr:6d}      1   POSRES_FC_SC   POSRES_FC_SC   POSRES_FC_SC")
     return out
 
 
-def add_position_restraints(top_text: str, skip_residues=SOLVENT_RESIDUES, k: int = 1000) -> str:
-    """Add `#ifdef POSRES` heavy-atom restraints to each solute moleculetype.
+def add_position_restraints(top_text: str, skip_residues=SOLVENT_RESIDUES) -> str:
+    """Add `#ifdef POSRES` restraints to each solute and lipid moleculetype.
 
-    parmed writes no posre files; pdb2gmx and the ligand step restrain solute
-    heavy atoms at 1000 kJ/mol/nm² during NVT and NPT, and so does this.
-    Moleculetypes made only of water and ions are left free.
+    parmed writes no posre files. On the soluble branch, pdb2gmx and the
+    ligand step restrain solute heavy atoms at 1000 kJ/mol/nm² during NVT and
+    NPT, and with the default force constants so does this. Moleculetypes
+    made only of water and ions are left free.
     """
     lines = top_text.splitlines()
-    out: List[str] = []
+    out: List[str] = [POSRES_DEFAULTS.rstrip()]
     section = None
     atoms: List[str] = []
     in_mol = False
@@ -384,7 +420,7 @@ def add_position_restraints(top_text: str, skip_residues=SOLVENT_RESIDUES, k: in
     def flush():
         resnames = {l.split(";")[0].split()[3] for l in atoms if len(l.split(";")[0].split()) >= 8}
         if atoms and not resnames <= set(skip_residues):
-            out.extend(["", "#ifdef POSRES"] + heavy_atom_posre(atoms, k) + ["#endif", ""])
+            out.extend(["", "#ifdef POSRES"] + solute_posre(atoms) + ["#endif", ""])
 
     for line in lines:
         stripped = line.split(";")[0].strip()
@@ -397,7 +433,7 @@ def add_position_restraints(top_text: str, skip_residues=SOLVENT_RESIDUES, k: in
             if new == "moleculetype":
                 in_mol = True
             section = new
-        elif in_mol and section == "atoms" and stripped:
+        elif in_mol and section == "atoms" and stripped and not stripped.startswith("#"):
             atoms.append(line)
         out.append(line)
     if in_mol:
@@ -439,6 +475,45 @@ def write_build_groups(structure, path: Path, ligand_resnames: Sequence[str] = (
     return groups
 
 
+def explicit_14_pairs(structure) -> int:
+    """Give each 1-4 pair its own parameters when the torsions' 1-4 scaling
+    isn't uniform. Lipid21 uses SCNB 6.0 on some torsions where everything
+    else uses 2.0; parmed then writes fudgeLJ 1 with generated pairs, which
+    doubles every other 1-4 vdW term (caught by the energy-parity check on a
+    POPC bilayer). With explicit pairs parmed sets gen-pairs no and writes
+    them. Returns the number of pairs written (0 when scaling is uniform)."""
+    import math
+    from parmed.topologyobjects import NonbondedException, NonbondedExceptionType
+
+    def scalings(d):
+        types = d.type if isinstance(d.type, list) else [d.type]
+        return {(t.scee, t.scnb) for t in types if t is not None}
+
+    torsions = [d for d in structure.dihedrals if not d.ignore_end and d.type is not None]
+    factors = set().union(*(scalings(d) for d in torsions)) if torsions else set()
+    if len({scnb for _, scnb in factors}) <= 1 or structure.adjusts:
+        return 0
+    types: Dict[Tuple[float, float, float], NonbondedExceptionType] = {}
+    seen = set()
+    for d in torsions:
+        a, b = d.atom1, d.atom4
+        key = (min(a.idx, b.idx), max(a.idx, b.idx))
+        if key in seen:
+            continue
+        seen.add(key)
+        scee, scnb = next(iter(scalings(d)))
+        rmin = a.rmin_14 + b.rmin_14
+        eps = math.sqrt(a.epsilon_14 * b.epsilon_14) / scnb
+        t = types.get((rmin, eps, scee))
+        if t is None:
+            t = types[(rmin, eps, scee)] = NonbondedExceptionType(rmin, eps, 1.0 / scee,
+                                                                 list=structure.adjust_types)
+            structure.adjust_types.append(t)
+        structure.adjusts.append(NonbondedException(a, b, type=t))
+    logger.info(f"amber_build: mixed 1-4 scaling {sorted(factors)}: {len(seen)} explicit 1-4 pairs")
+    return len(seen)
+
+
 def convert_to_gromacs(workspace: Path, compound_id: str, prmtop: Path, inpcrd: Path,
                        protein: Optional[PreparedProtein] = None,
                        adduct: Optional[Tuple[str, Sequence[str]]] = None) -> Tuple[Path, Path, Dict]:
@@ -449,12 +524,13 @@ def convert_to_gromacs(workspace: Path, compound_id: str, prmtop: Path, inpcrd: 
     structure = parmed.load_file(str(prmtop), xyz=str(inpcrd))
     n_prot = len(protein.residue_ids) if protein else 0
     ligand_resnames = sorted({r.name for r in structure.residues[n_prot:]
-                              if r.name not in _GMX_RESIDUE})
+                              if r.name not in _GMX_RESIDUE and r.name not in LIPID_RESIDUES})
     _renumber(structure, protein)
     _gmx_names(structure)
 
     gro = workspace / f"{compound_id}_solv_ions.gro"
     top = workspace / f"{compound_id}_amber.top"
+    explicit_14_pairs(structure)
     gmx_top = parmed.gromacs.GromacsTopologyFile.from_structure(structure)
     gmx_top.write(str(top))
     top.write_text(add_position_restraints(top.read_text()))

@@ -1417,6 +1417,69 @@ def covalent_bond_length(workspace: Path, compound_id: str, atoms: List[int]) ->
     }
 
 
+# Lipid21 POPC at 303 K: about 65 Å² per lipid (experiment 64-68); accepted range
+APL_RANGE = (60.0, 70.0)
+
+
+def _gro_atoms(gro: Path):
+    """(resnum, resname, atom name, xyz nm) per atom, and the box (nm)."""
+    lines = gro.read_text().splitlines()
+    n = int(lines[1])
+    atoms = [(int(l[0:5]), l[5:10].strip(), l[10:15].strip(),
+              (float(l[20:28]), float(l[28:36]), float(l[36:44]))) for l in lines[2:2 + n]]
+    return atoms, [float(v) for v in lines[2 + n].split()[:3]]
+
+
+def membrane_metrics(workspace: Path, compound_id: str) -> Dict[str, Any]:
+    """Bilayer checks: area per lipid over the production run (box x*y over
+    lipids per leaflet), P-P thickness and leaflet balance (final frame), and
+    lipid molecules within 4 Å of the ligand (final frame)."""
+    out: Dict[str, Any] = {}
+    gro = workspace / f"{compound_id}_md.gro"
+    atoms, box = _gro_atoms(gro)
+    # the head-group phosphorus, P31 in Lipid21
+    p_z = [xyz[2] for _, res, name, xyz in atoms if res == "PC" and name.startswith("P")]
+    if not p_z:
+        return {"error": "no lipid phosphorus atoms in the system"}
+    mid = sum(p_z) / len(p_z)
+    upper, lower = [z for z in p_z if z > mid], [z for z in p_z if z <= mid]
+    out["lipids"] = len(p_z)
+    out["leaflets"] = {"upper": len(upper), "lower": len(lower)}
+    out["thickness_pp_angstrom"] = round((sum(upper) / len(upper) - sum(lower) / len(lower)) * 10.0, 2)
+
+    xvg = workspace / f"{compound_id}_md_box.xvg"
+    try:
+        subprocess.run(["gmx", "energy", "-f", f"{compound_id}_md.edr", "-o", xvg.name],
+                       input=b"Box-X\nBox-Y\n\n", check=True, cwd=workspace, capture_output=True)
+        rows = [r for r in _parse_xvg(xvg) if len(r) >= 3]
+        areas = [r[1] * r[2] * 100.0 for r in rows]  # nm² -> Å²
+        per_leaflet = len(p_z) / 2.0
+        apl = [a / per_leaflet for a in areas]
+        mean_apl = sum(apl) / len(apl)
+        out["area_per_lipid_angstrom2"] = {
+            "mean": round(mean_apl, 2), "first": round(apl[0], 2), "last": round(apl[-1], 2),
+            "expected_range": list(APL_RANGE),
+            "in_range": APL_RANGE[0] <= mean_apl <= APL_RANGE[1],
+            "note": "includes the protein's cross-section, so it reads high for a large protein",
+        }
+    except (subprocess.CalledProcessError, ZeroDivisionError, OSError) as e:
+        out["area_per_lipid_angstrom2"] = {"error": str(e)[-200:]}
+
+    groups = _build_groups(workspace, compound_id)
+    if groups is not None and groups[1]:
+        ligand = [atoms[i - 1][3] for i in sorted(groups[1]) if i <= len(atoms)]
+        near = set()
+        for resnum, res, name, xyz in atoms:
+            if res in ("PA", "PC", "OL") and not name.startswith("H"):
+                if any(sum((a - b) ** 2 for a, b in zip(xyz, l)) < 0.16 for l in ligand):  # 4 Å
+                    near.add((resnum, res))
+        # a POPC is three consecutive residues, PA (tail) PC (head) OL (tail):
+        # count each lipid once, by its head residue
+        head = {"PA": 1, "PC": 0, "OL": -1}
+        out["lipids_contacting_ligand"] = len({r + head[res] for r, res in near})
+    return out
+
+
 def _make_mmgbsa_index(workspace: Path, compound_id: str, gro_file: str):
     """Create GROMACS index file with Protein + Ligand groups — pure Python.
 
@@ -2154,6 +2217,13 @@ def analyze_trajectory(
         )
 
         # --- Binding-specific analyses (Theo P1) ---
+        if route == "run_membrane":
+            try:
+                analysis["membrane"] = membrane_metrics(workspace, compound_id)
+            except Exception as e:
+                logger.warning(f"Membrane analysis failed: {e}")
+                analysis["membrane"] = {"error": str(e)}
+
         # Only run when a ligand is present. Membrane systems skip MM-GBSA
         # because standard GB/PB solvation is wrong with a bilayer in the
         # system — the lipid gets counted in the solvation term.

@@ -59,6 +59,32 @@ STANDARD_AA = {
 }
 
 
+# Crystallization and buffer additives: removed with the other HETATMs without comment
+_ADDITIVES = {"HOH", "SO4", "PO4", "GOL", "EDO", "PEG", "PG4", "PGE", "1PE", "12P", "ACT", "ACM",
+              "BU1", "DMS", "MPD", "TRS", "EPE", "MES", "CIT", "FMT", "IMD", "BME", "NO3", "NA",
+              "CL", "K", "MG", "CA", "ZN", "IOD", "BR"}
+
+
+def construct_notes(pdb_content: str, ligand_smiles=None, simulated=()) -> list:
+    """What the user should know about the deposited construct: a fusion
+    (chimera) domain that is simulated with the protein, and crystal HETATMs
+    that aren't simulated (cholesterol, lipids, cofactors; additives aside)."""
+    notes = []
+    compnd = " ".join(l[10:].strip() for l in pdb_content.splitlines() if l.startswith("COMPND"))
+    molecules = [m.split(":", 1)[1].split(";")[0].strip() for m in compnd.split("MOLECULE")[1:]
+                 if ":" in m]
+    fused = [m for m in molecules if any(w in m.upper() for w in ("CHIMERA", "FUSION"))]
+    if fused:
+        notes.append(f"the deposited construct is a fusion ({fused[0][:80]}); the fused domain "
+                     f"is simulated with the protein")
+    hets = sorted({l[17:20].strip() for l in pdb_content.splitlines()
+                   if l.startswith("HETATM")} - _ADDITIVES - {"MSE"} - set(simulated))
+    if hets:
+        what = " (the submitted ligand is docked in place of the crystal's)" if ligand_smiles else ""
+        notes.append(f"crystal HETATM groups not simulated: {', '.join(hets[:8])}{what}")
+    return notes
+
+
 def convert_selenomethionine(pdb_content: str) -> tuple[str, int]:
     """Rewrite MSE residues as MET (Se -> S); returns the PDB and how many."""
     out, residues = [], set()

@@ -23,7 +23,7 @@ FunctionalRole = Literal[
 
 Route = Literal[
     "run_soluble",       # happy path — no metals, no membrane, no exotic cofactors
-    "run_membrane",      # membrane protein — CHARMM36m + packmol-memgen bilayer branch
+    "run_membrane",      # membrane protein — OPM-oriented, POPC bilayer (packmol-memgen), ff14SB + Lipid21
     "run_covalent",      # one ligand bonded to a Cys SG — CVX residue, tleap (ff14SB + GAFF2)
     "refused",           # classifier declined the system; see reasons
 ]
@@ -37,7 +37,7 @@ ClassificationSource = Literal[
 ]
 
 SuggestedBranch = Literal[
-    "charmm36m_membrane",   # future: membrane branch (doc 02)
+    "charmm36m_membrane",   # membrane branch (name kept for API compatibility; it is AMBER Lipid21)
     "mcpb_distal",          # future: MCPB workflow for structural/distal metals
     "qmmm_active_site",     # future: QM/MM for catalytic metals
     "covalent_ligand",      # future: covalent-ligand parameterization

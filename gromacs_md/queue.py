@@ -57,6 +57,25 @@ def estimate_runtime_minutes(
     return production_min + overhead_min
 
 
+# A POPC bilayer system is ~3x the atoms of a soluble protein (2RH1: 145k
+# against 181L's 47k), so its production runs ~3x slower until measured.
+MEMBRANE_RATE_FACTOR = 3.0
+# docking, ACPYPE, packing (~8 min for 2RH1), tleap and the energy-parity check
+MEMBRANE_SETUP_MIN = 15
+# the six equilibration stages (375 ps at 1 fs + 1500 ps at 2 fs) take as many
+# steps as 2.25 ns of production at 2 fs
+MEMBRANE_EQUILIBRATION_NS = 2.25
+MEMBRANE_ANALYSIS_MIN = 5
+
+
+def membrane_runtime_minutes(simulation_ns: float, measured_membrane_min_per_ns: Optional[float],
+                             protein_min_per_ns: Optional[float]) -> int:
+    """Runtime of a membrane job, known only once intake has classified it."""
+    rate = measured_membrane_min_per_ns or (protein_min_per_ns or MD_MIN_PER_NS) * MEMBRANE_RATE_FACTOR
+    return math.ceil(MEMBRANE_SETUP_MIN + (MEMBRANE_EQUILIBRATION_NS + simulation_ns) * rate
+                     + MEMBRANE_ANALYSIS_MIN)
+
+
 def get_gpu_queue_info(state: AppState) -> dict:
     """Get current GPU utilization info from the semaphore."""
     if not state.gpu_sem:

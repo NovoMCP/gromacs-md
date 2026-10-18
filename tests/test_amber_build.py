@@ -128,19 +128,45 @@ SOL      100
 """
 
 
+def _posre_rows(block):
+    body = block.split("[ position_restraints ]")[1].split("#endif")[0]
+    return [l.split() for l in body.splitlines()[1:] if l.strip() and not l.startswith(";")]
+
+
 def test_position_restraints_on_solute_heavy_atoms_only():
     out = ab.add_position_restraints(TOP)
     blocks = out.split("[ moleculetype ]")
     protein, water, ligand = blocks[1], blocks[2], blocks[3]
     assert protein.count("#ifdef POSRES") == 1
-    restrained = [l.split()[0] for l in protein.split("[ position_restraints ]")[1].splitlines()[2:]
-                  if l.strip() and not l.startswith("#")]
-    assert restrained == ["1", "3"]  # N and CA, not H1
+    rows = _posre_rows(protein)
+    # N and CA are backbone; H1 isn't restrained
+    assert [(r[0], r[2]) for r in rows] == [("1", "POSRES_FC_BB"), ("3", "POSRES_FC_BB")]
     assert "POSRES" not in water
-    assert ligand.count("#ifdef POSRES") == 1
+    lig_rows = _posre_rows(ligand)
+    assert lig_rows == [["1", "1", "POSRES_FC_SC", "POSRES_FC_SC", "POSRES_FC_SC"]]
     # each block sits inside its own moleculetype, before the next one starts
-    assert out.index("#endif") < out.index("SOL          3")
+    assert out.index("#endif", out.index("[ moleculetype ]")) < out.index("SOL          3")
     assert "[ system ]" in out and out.rstrip().endswith("SOL      100")
+    # the force constants default to the soluble branch's 1000
+    assert out.startswith("; position-restraint force constants")
+    assert "#define POSRES_FC_BB 1000.0" in out and "#define POSRES_FC_LIPID 1000.0" in out
+
+
+def test_lipids_are_restrained_on_phosphorus_z_only():
+    popc = """[ moleculetype ]
+POPC 3
+
+[ atoms ]
+     1   cA   1   PA   C12   1  0.0  12.01
+     2   pA   2   PC   P31   2  1.0  30.97
+     3   oP   2   PC   O13   3 -0.8  16.00
+     4   cA   3   OL   C12   4  0.0  12.01
+
+[ system ]
+x
+"""
+    out = ab.add_position_restraints(popc)
+    assert _posre_rows(out) == [["2", "1", "0", "0", "POSRES_FC_LIPID"]]
 
 
 def test_ranges_compress_atom_numbers():
@@ -230,3 +256,37 @@ def test_topology_residue_numbers_take_the_pdb_numbers():
     assert [r[2] for r in rows if r[3] == "SOL"] == ["1", "1", "1"]
     with pytest.raises(ab.AmberBuildError, match="out of step"):
         ab._renumber_atoms_sections(TOP, [[394], [1], [395]], [["ALA"], ["SOL"], ["BNZ"]])
+
+
+def _four_atom_chains(scnbs):
+    parmed = pytest.importorskip("parmed")
+    from parmed.topologyobjects import Atom, Bond, Dihedral, DihedralType
+    s = parmed.Structure()
+    for k, scnb in enumerate(scnbs):
+        atoms = []
+        for i in range(4):
+            a = Atom(name=f"C{i}", type="c3", charge=0.1, mass=12.01, atomic_number=6)
+            a.rmin, a.epsilon = 1.9 + 0.1 * i, 0.1 * (i + 1)
+            s.add_atom(a, "RES", k + 1)
+            atoms.append(a)
+        for a, b in zip(atoms, atoms[1:]):
+            s.bonds.append(Bond(a, b))
+        t = DihedralType(1.0, 3, 0.0, scee=1.2, scnb=scnb, list=s.dihedral_types)
+        s.dihedral_types.append(t)
+        s.dihedrals.append(Dihedral(*atoms, type=t))
+    return s
+
+
+def test_mixed_14_scaling_gets_explicit_pairs():
+    s = _four_atom_chains([2.0, 6.0])
+    assert ab.explicit_14_pairs(s) == 2
+    by_res = {p.atom1.residue.idx: p.type for p in s.adjusts}
+    rmin, eps = 1.9 + 2.2, (0.1 * 0.4) ** 0.5  # C0 with C3
+    assert by_res[0].rmin == pytest.approx(rmin) and by_res[0].epsilon == pytest.approx(eps / 2.0)
+    assert by_res[1].epsilon == pytest.approx(eps / 6.0)
+    assert by_res[0].chgscale == pytest.approx(1 / 1.2)
+
+
+def test_uniform_14_scaling_is_left_to_gromacs():
+    s = _four_atom_chains([2.0, 2.0])
+    assert ab.explicit_14_pairs(s) == 0 and not s.adjusts

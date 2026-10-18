@@ -20,11 +20,19 @@ from .redis_jobs import update_job_status, complete_job, fail_job, refuse_job, k
 from .s3_storage import upload_results_to_blob
 from .subprocess_utils import run_subprocess, load_mdrun_retries, without_nsteps, is_cancelled, forget_cancelled
 from .ligand_input import LigandInputError, prepare_ligand_smiles
-from .queue import overhead_kind, record_min_per_ns, record_overhead_minutes, system_kind
+from .queue import (
+    measured_min_per_ns,
+    membrane_runtime_minutes,
+    overhead_kind,
+    record_min_per_ns,
+    record_overhead_minutes,
+    system_kind,
+)
 from .result_compact import compact_analysis, write_full_analysis
 from .placement import native_ligand_site, place_ligand, save_placement, load_placement
 from .pdb_handling import (
     clean_pdb_protein_only,
+    construct_notes,
     convert_selenomethionine,
     repair_missing_atoms,
     smiles_to_pdb,
@@ -38,14 +46,25 @@ from .topology import (
     write_nvt_mdp,
     write_npt_mdp,
     write_md_mdp,
-    _fill_mdp_template as fill_mdp_template,
+    write_membrane_stage_mdp,
+    MEMBRANE_NVT_STAGES,
+    MEMBRANE_NPT_STAGES,
+    MEMBRANE_STAGES,
 )
 from .analysis import analyze_trajectory
 from .amber_build import build_for_pipeline, load_build_info
 from .covalent_build import build_covalent_for_pipeline, covalent_site, fetch_ccd
 from intake.covalent import covalent_ligand_link_records
+from .membrane_build import (
+    build_membrane_for_pipeline,
+    fetch_opm_oriented,
+    opm_half_thickness,
+    superpose_onto,
+)
 
 logger = logging.getLogger(__name__)
+
+MEMBRANE_STAGE_NAMES = [s[0] for s in MEMBRANE_STAGES]
 
 
 # ─── Step 5: resume-after-restart helpers ────────────────────────────────────
@@ -235,231 +254,6 @@ async def _production_cpt_uploader(
             logger.warning(f"Production cpt upload tick failed: {e}")
 
 
-async def _run_membrane_pipeline(
-    state: AppState,
-    job_id: str,
-    compound_id: str,
-    pdb_content: str,
-    simulation_ns: float,
-    temperature: float,
-):
-    """Membrane MD pipeline — CHARMM36m protein + lipids via packmol-memgen.
-
-    Separate from the soluble pipeline because:
-    - Bilayer construction replaces box + solvate + ionize
-    - Semi-isotropic pressure coupling (not isotropic)
-    - Six-stage equilibration (not two-stage)
-    - CHARMM36m force field (not AMBER99SB-ILDN)
-    - Membrane-specific analysis (area-per-lipid, SCD, density profile)
-
-    Runs inside the GPU semaphore like the soluble pipeline.
-    """
-    from intake.membrane import build_membrane_system, convert_to_gromacs
-
-    loop = asyncio.get_event_loop()
-
-    async with state.gpu_sem:
-        logger.info(f"Job {job_id}: Acquired GPU semaphore (membrane branch)")
-        if await is_job_cancelled(state, job_id):
-            logger.info(f"Job {job_id}: cancelled while queued")
-            return
-
-        try:
-            with tempfile.TemporaryDirectory() as workspace_str:
-                workspace = Path(workspace_str)
-                ntomp = str(NTOMP)
-                mdp_dir = Path("/app/mdp_templates/membrane")
-
-                # 1. Write protein PDB to workspace
-                protein_pdb = workspace / f"{compound_id}_protein.pdb"
-                protein_pdb.write_text(pdb_content)
-
-                # 2. Build bilayer with packmol-memgen
-                await update_job_status(state, job_id, "processing", {
-                    "percentage": 8,
-                    "message": "Building lipid bilayer (packmol-memgen)",
-                    "step": "bilayer_build",
-                })
-                try:
-                    system_pdb, system_prmtop, build_stats = await loop.run_in_executor(
-                        None,
-                        build_membrane_system,
-                        protein_pdb, workspace, compound_id,
-                    )
-                except Exception as e:
-                    logger.error(f"Job {job_id}: bilayer build failed: {e}")
-                    await fail_job(state, job_id, f"Bilayer construction failed: {e}")
-                    return
-
-                await update_job_status(state, job_id, "processing", {
-                    "percentage": 12,
-                    "message": f"Bilayer built: {build_stats.get('n_lipids', '?')} lipids",
-                    "step": "bilayer_done",
-                })
-
-                # 3. Convert AMBER topology to GROMACS format
-                await update_job_status(state, job_id, "processing", {
-                    "percentage": 15,
-                    "message": "Converting topology (parmed AMBER→GROMACS)",
-                    "step": "topology_convert",
-                })
-                try:
-                    gro_file, top_file = await loop.run_in_executor(
-                        None,
-                        convert_to_gromacs,
-                        system_prmtop, system_pdb, workspace, compound_id,
-                    )
-                except Exception as e:
-                    logger.error(f"Job {job_id}: topology conversion failed: {e}")
-                    await fail_job(state, job_id, f"Topology conversion failed: {e}")
-                    return
-
-                # 4. Energy minimization
-                await update_job_status(state, job_id, "processing", {
-                    "percentage": 18,
-                    "message": "Energy minimization",
-                    "step": "em",
-                })
-                em_mdp = mdp_dir / "em.mdp"
-                await loop.run_in_executor(
-                    None, run_subprocess,
-                    ["gmx", "grompp", "-f", str(em_mdp),
-                     "-c", str(gro_file), "-p", str(top_file),
-                     "-o", f"{compound_id}_em.tpr", "-maxwarn", "5"],
-                    workspace,
-                )
-                await loop.run_in_executor(
-                    None, run_subprocess,
-                    ["gmx", "mdrun", "-deffnm", f"{compound_id}_em",
-                     "-ntmpi", "1", "-ntomp", ntomp, "-nb", "gpu"],
-                    workspace,
-                )
-
-                # 5. NVT equilibration (restrained, 500 ps)
-                await update_job_status(state, job_id, "processing", {
-                    "percentage": 25,
-                    "message": "NVT equilibration (restrained, 500 ps)",
-                    "step": "nvt",
-                })
-                nvt_mdp = fill_mdp_template(mdp_dir / "nvt_restrained.mdp", temperature=temperature)
-                nvt_mdp_path = workspace / "nvt.mdp"
-                nvt_mdp_path.write_text(nvt_mdp)
-                await loop.run_in_executor(
-                    None, run_subprocess,
-                    ["gmx", "grompp", "-f", str(nvt_mdp_path),
-                     "-c", f"{compound_id}_em.gro", "-r", f"{compound_id}_em.gro",
-                     "-p", str(top_file),
-                     "-o", f"{compound_id}_nvt.tpr", "-maxwarn", "5"],
-                    workspace,
-                )
-                await loop.run_in_executor(
-                    None, run_subprocess,
-                    ["gmx", "mdrun", "-deffnm", f"{compound_id}_nvt",
-                     "-ntmpi", "1", "-ntomp", ntomp, "-nb", "gpu"],
-                    workspace,
-                )
-
-                # 6. NPT equilibration stages (3 stages, ~15 ns total)
-                npt_stages = [
-                    ("npt_eq1.mdp", "NPT eq1 (protein + lipid restrained, 5 ns)", 35),
-                    ("npt_eq2.mdp", "NPT eq2 (protein restrained, lipids free, 5 ns)", 50),
-                    ("npt_eq3.mdp", "NPT eq3 (backbone only, 5 ns)", 65),
-                ]
-                prev_gro = f"{compound_id}_nvt.gro"
-                for mdp_name, stage_msg, pct in npt_stages:
-                    stage_id = mdp_name.replace(".mdp", "")
-                    await update_job_status(state, job_id, "processing", {
-                        "percentage": pct,
-                        "message": stage_msg,
-                        "step": stage_id,
-                    })
-                    stage_mdp = fill_mdp_template(mdp_dir / mdp_name, temperature=temperature)
-                    stage_mdp_path = workspace / f"{stage_id}.mdp"
-                    stage_mdp_path.write_text(stage_mdp)
-                    await loop.run_in_executor(
-                        None, run_subprocess,
-                        ["gmx", "grompp", "-f", str(stage_mdp_path),
-                         "-c", prev_gro, "-r", prev_gro,
-                         "-p", str(top_file),
-                         "-o", f"{compound_id}_{stage_id}.tpr", "-maxwarn", "5"],
-                        workspace,
-                    )
-                    await loop.run_in_executor(
-                        None, run_subprocess,
-                        ["gmx", "mdrun", "-deffnm", f"{compound_id}_{stage_id}",
-                         "-ntmpi", "1", "-ntomp", ntomp, "-nb", "gpu"],
-                        workspace,
-                    )
-                    prev_gro = f"{compound_id}_{stage_id}.gro"
-
-                # 7. Production MD
-                nsteps = int(simulation_ns * 1e6 / 2)  # dt=0.002 ps
-                await update_job_status(state, job_id, "processing", {
-                    "percentage": 70,
-                    "message": f"Production MD ({simulation_ns} ns)",
-                    "step": "production",
-                })
-                prod_mdp = fill_mdp_template(
-                    mdp_dir / "production.mdp",
-                    temperature=temperature,
-                    nsteps=nsteps,
-                )
-                prod_mdp_path = workspace / "production.mdp"
-                prod_mdp_path.write_text(prod_mdp)
-                await loop.run_in_executor(
-                    None, run_subprocess,
-                    ["gmx", "grompp", "-f", str(prod_mdp_path),
-                     "-c", prev_gro, "-p", str(top_file),
-                     "-o", f"{compound_id}_md.tpr", "-maxwarn", "5"],
-                    workspace,
-                )
-                await loop.run_in_executor(
-                    None, run_subprocess,
-                    ["gmx", "mdrun", "-deffnm", f"{compound_id}_md",
-                     "-ntmpi", "1", "-ntomp", ntomp, "-nb", "gpu"],
-                    workspace,
-                )
-
-                # 8. Analysis (reuse existing + membrane-specific)
-                await update_job_status(state, job_id, "processing", {
-                    "percentage": 90,
-                    "message": "Analyzing trajectory",
-                    "step": "analysis",
-                })
-                analysis = await loop.run_in_executor(
-                    None, analyze_trajectory, workspace, compound_id
-                )
-                analysis["membrane"] = {
-                    "build_stats": build_stats,
-                    "equilibration_stages": ["em", "nvt", "npt_eq1", "npt_eq2", "npt_eq3"],
-                    "force_field": "charmm36m",
-                    "lipid": build_stats.get("lipid", "POPC"),
-                    "note": "Validate: area-per-lipid 65-68 A^2, density profile symmetry, SCD order parameters",
-                }
-
-                # 9. Upload results
-                full_analysis = write_full_analysis(workspace, compound_id, analysis)
-                result = {
-                    "compound_id": compound_id,
-                    "simulation_ns": simulation_ns,
-                    "temperature": temperature,
-                    "pipeline": "membrane",
-                    "force_field": "charmm36m",
-                    "analysis": compact_analysis(analysis),
-                    "output_files": [full_analysis] if full_analysis else [],
-                }
-
-                blob_url = await upload_results_to_blob(state, workspace, job_id, result)
-                if blob_url:
-                    result["blob_url"] = blob_url
-
-                await complete_job(state, job_id, result)
-
-        except Exception as e:
-            logger.exception(f"Membrane pipeline failed for {job_id}: {e}")
-            await fail_job(state, job_id, str(e))
-
-
 async def run_simulation_pipeline(state: AppState, job_id: str, *args, **kwargs):
     """Run the pipeline with a heartbeat, so /status can tell a job whose
     worker died (service restart, crash) from one that is still running.
@@ -611,6 +405,43 @@ async def _box_solvate_ionize(state: AppState, job_id: str, workspace: Path, com
     )
 
 
+async def _membrane_stages(state: AppState, job_id: str, workspace: Path, compound_id: str,
+                           stages, start: str, out: str, top_file: Path, temperature: float,
+                           pressure: float, ntomp: str, first: bool) -> None:
+    """Run membrane equilibration stages in sequence from <start>.gro (and
+    .cpt unless `first`), restrained to the minimized structure, and leave the
+    last stage's files as <cid>_<out>.* for the next pipeline stage."""
+    loop = asyncio.get_event_loop()
+    prev = start
+    for k, stage in enumerate(stages):
+        name = f"{compound_id}_{stage[0]}"
+        await update_job_status(state, job_id, "processing", {
+            "percentage": 30 + 3 * MEMBRANE_STAGE_NAMES.index(stage[0]),
+            "message": f"Membrane equilibration {stage[0][-1]}/{len(MEMBRANE_STAGE_NAMES)} "
+                       f"({'NPT' if stage[1] else 'NVT'}, {stage[3]} ps, restraints "
+                       f"{stage[4]}/{stage[5]}/{stage[6]})",
+            "step": out,
+        })
+        write_membrane_stage_mdp(workspace, compound_id, stage, temperature, pressure,
+                                 first=first and k == 0)
+        grompp = ["gmx", "grompp", "-f", f"{name}.mdp", "-c", f"{prev}.gro",
+                  "-r", f"{compound_id}_em.gro", "-p", str(top_file), "-o", f"{name}.tpr", "-maxwarn", "5"]
+        if not (first and k == 0):
+            grompp[6:6] = ["-t", f"{prev}.cpt"]
+        await loop.run_in_executor(None, run_subprocess, grompp, workspace)
+        await loop.run_in_executor(
+            None, run_subprocess,
+            ["gmx", "mdrun", "-v", "-deffnm", name,
+             "-nb", "gpu", "-update", "cpu", "-gpu_id", "0", "-ntmpi", "1", "-ntomp", ntomp],
+            workspace,
+        )
+        prev = name
+    for ext in ("gro", "cpt", "edr", "log", "tpr"):
+        src = workspace / f"{prev}.{ext}"
+        if src.exists():
+            shutil.copy(src, workspace / f"{compound_id}_{out}.{ext}")
+
+
 async def _run_simulation_pipeline(
     state: AppState,
     job_id: str,
@@ -685,6 +516,7 @@ async def _run_simulation_pipeline(
     # PDB even on the retry container.
     skip_intake = "system_prep" in completed
     covalent: Optional[Dict] = None  # the covalent site, for route run_covalent
+    membrane_site: Optional[Dict] = None  # OPM orientation, for route run_membrane
 
     # ------------------------------------------------------------------
     # Intake classification gate
@@ -693,7 +525,7 @@ async def _run_simulation_pipeline(
     # The co-crystallized ligand locates the binding site for docking the
     # ligand's starting pose; read it before cleaning strips HETATM records.
     native_site = (
-        native_ligand_site(pdb_content) if pdb_content and ligand_smiles and not skip_intake else None
+        native_ligand_site(pdb_content, ligand_smiles) if pdb_content and ligand_smiles and not skip_intake else None
     )
     if pdb_content and not skip_intake:
         await update_job_status(state, job_id, "processing", {
@@ -736,6 +568,38 @@ async def _run_simulation_pipeline(
                     f"submitted SMILES not used: the crystal's covalently bound {site['ligand_code']} "
                     f"is simulated")
                 ligand_smiles = None
+        if route == "run_membrane":
+            # OPM's frame: membrane normal along z, bilayer centre at z = 0.
+            # The whole submitted structure moves there, ligand included, so
+            # the binding site found below is in the frame packing uses.
+            await update_job_status(state, job_id, "processing", {
+                "percentage": 3, "message": "Orienting in the membrane (OPM)", "step": "orient",
+            })
+            try:
+                opm_text = await loop.run_in_executor(None, fetch_opm_oriented, pdb_id or "")
+                pdb_content, rmsd = superpose_onto(pdb_content, opm_text)
+            except Exception as e:
+                await fail_job(state, job_id, f"membrane orientation: {e}")
+                return
+            membrane_site = {"source": "OPM", "pdb_id": pdb_id, "fit_rmsd_angstrom": round(rmsd, 3),
+                             "half_thickness_angstrom": opm_half_thickness(opm_text)}
+            builder = "tleap"
+            if ligand_smiles:
+                native_site = native_ligand_site(pdb_content, ligand_smiles)
+            # the submission's estimate assumed a soluble protein
+            estimate = membrane_runtime_minutes(
+                simulation_ns, await measured_min_per_ns(state, "membrane"),
+                await measured_min_per_ns(state, "protein"))
+            if state.redis:
+                try:
+                    await state.redis.hset(f"novomcp:job:{job_id}", "estimated_runtime_minutes", str(estimate))
+                except Exception as e:
+                    logger.warning(f"Job {job_id}: could not update the runtime estimate: {e}")
+            await update_job_status(state, job_id, "processing", {
+                "percentage": 3,
+                "message": f"Membrane protein: POPC bilayer system, estimated {estimate} min in all",
+                "step": "orient",
+            })
 
         # Classifier approved. Next steps in order:
         #
@@ -753,6 +617,8 @@ async def _run_simulation_pipeline(
             "message": "Repairing missing sidechain atoms (PDBFixer)",
             "step": "repair",
         })
+        structure_notes += construct_notes(
+            pdb_content, ligand_smiles, simulated={covalent["ligand_code"]} if covalent else ())
         pdb_content, n_mse = convert_selenomethionine(pdb_content)
         if n_mse:
             structure_notes.append(f"{n_mse} selenomethionine (MSE) residues simulated as methionine")
@@ -785,24 +651,6 @@ async def _run_simulation_pipeline(
             logger.warning(f"Job {job_id}: {e}")
             await fail_job(state, job_id, str(e))
             return
-
-    # ------------------------------------------------------------------
-    # Membrane branch — separate pipeline (packmol-memgen + CHARMM36m)
-    # ------------------------------------------------------------------
-    # Membrane resume is out of scope for Phase 1 (DURABILITY-DESIGN Part 2
-    # non-goals). On resume we skip the membrane dispatch since the soluble
-    # pipeline is the only one with stage gating; the caller is responsible
-    # for not passing resume_workdir for membrane jobs.
-    if route == "run_membrane" and pdb_content and not skip_intake:
-        await _run_membrane_pipeline(
-            state=state,
-            job_id=job_id,
-            compound_id=compound_id,
-            pdb_content=pdb_content,
-            simulation_ns=simulation_ns,
-            temperature=temperature,
-        )
-        return
 
     async with state.gpu_sem:
         logger.info(f"Job {job_id}: Acquired GPU semaphore, starting simulation")
@@ -871,6 +719,22 @@ async def _run_simulation_pipeline(
                     gro_file, top_file, _ = await loop.run_in_executor(
                         None, build_covalent_for_pipeline, workspace, compound_id, pdb_content,
                         covalent, covalent["ccd"],
+                    )
+
+                elif membrane_site is not None:
+                    ligand_pdb = None
+                    if ligand_smiles:
+                        ligand_pdb = workspace / f"{compound_id}_ligand.pdb"
+                        await _dock_starting_pose(
+                            state, job_id, workspace, ligand_smiles, pdb_content, native_site, ligand_pdb)
+                    await update_job_status(state, job_id, "processing", {
+                        "percentage": 8,
+                        "message": "Building the membrane system (POPC bilayer, packmol-memgen + tleap)",
+                        "step": "membrane_build",
+                    })
+                    gro_file, top_file, _ = await loop.run_in_executor(
+                        None, build_membrane_for_pipeline, workspace, compound_id, pdb_content,
+                        ligand_pdb, ligand_smiles, membrane_site,
                     )
 
                 elif builder == "tleap":
@@ -969,6 +833,11 @@ async def _run_simulation_pipeline(
                 completed.append("system_prep")
 
             ntomp = str(NTOMP)
+            # from the build, so a resumed membrane job keeps its protocol
+            membrane = "membrane" in load_build_info(workspace, compound_id)
+            # measured rates are kept per system kind; a bilayer system is ~3x
+            # the atoms of a soluble one and would skew the soluble estimates
+            rate_kind = "membrane" if membrane else system_kind(bool(pdb_content))
 
             # ============== Stage: em ==============
             if "em" in completed or _stage_complete(workspace, "em"):
@@ -1014,21 +883,26 @@ async def _run_simulation_pipeline(
                 await update_job_status(state, job_id, "processing", {
                     "percentage": 30, "message": "NVT equilibration", "step": "nvt",
                 })
-                write_nvt_mdp(workspace, compound_id, temperature)
-                await loop.run_in_executor(
-                    None, run_subprocess,
-                    ["gmx", "grompp", "-f", f"{compound_id}_nvt.mdp",
-                     "-c", f"{compound_id}_em.gro", "-r", f"{compound_id}_em.gro",
-                     "-p", str(top_file), "-o", f"{compound_id}_nvt.tpr", "-maxwarn", "5"],
-                    workspace,
-                )
-                await loop.run_in_executor(
-                    None, run_subprocess,
-                    ["gmx", "mdrun", "-v", "-deffnm", f"{compound_id}_nvt",
-                     "-nb", "gpu", "-update", "cpu", "-gpu_id", "0", "-ntmpi", "1", "-ntomp", ntomp],
-                    workspace,
-                )
-                _finalize_stage(workspace, "nvt", [f"{compound_id}_nvt.*"])
+                if membrane:
+                    await _membrane_stages(state, job_id, workspace, compound_id, MEMBRANE_NVT_STAGES,
+                                           f"{compound_id}_em", "nvt", top_file, temperature,
+                                           pressure, ntomp, first=True)
+                else:
+                    write_nvt_mdp(workspace, compound_id, temperature)
+                    await loop.run_in_executor(
+                        None, run_subprocess,
+                        ["gmx", "grompp", "-f", f"{compound_id}_nvt.mdp",
+                         "-c", f"{compound_id}_em.gro", "-r", f"{compound_id}_em.gro",
+                         "-p", str(top_file), "-o", f"{compound_id}_nvt.tpr", "-maxwarn", "5"],
+                        workspace,
+                    )
+                    await loop.run_in_executor(
+                        None, run_subprocess,
+                        ["gmx", "mdrun", "-v", "-deffnm", f"{compound_id}_nvt",
+                         "-nb", "gpu", "-update", "cpu", "-gpu_id", "0", "-ntmpi", "1", "-ntomp", ntomp],
+                        workspace,
+                    )
+                _finalize_stage(workspace, "nvt", [f"{compound_id}_nvt.*", f"{compound_id}_memb*"])
                 if checkpoint_callback:
                     try:
                         checkpoint_callback("nvt", workspace / "stage_nvt")
@@ -1057,7 +931,11 @@ async def _run_simulation_pipeline(
                 })
 
                 npt_adaptive_log = None
-                if adaptive_equilibration:
+                if membrane:
+                    await _membrane_stages(state, job_id, workspace, compound_id, MEMBRANE_NPT_STAGES,
+                                           f"{compound_id}_nvt", "npt", top_file, temperature,
+                                           pressure, ntomp, first=False)
+                elif adaptive_equilibration:
                     initial_nsteps = 50000  # 50 ps initial window
                     extension_ps = 100.0    # extend by 100 ps per iteration
                     max_cumulative_ps = 1000.0  # 1 ns cap
@@ -1151,7 +1029,8 @@ async def _run_simulation_pipeline(
                         workspace,
                     )
 
-                _finalize_stage(workspace, "npt", [f"{compound_id}_npt.*", "_npt_adaptive.json"])
+                _finalize_stage(workspace, "npt", [f"{compound_id}_npt.*", "_npt_adaptive.json",
+                                                   f"{compound_id}_memb*"])
                 if checkpoint_callback:
                     try:
                         checkpoint_callback("npt", workspace / "stage_npt")
@@ -1186,7 +1065,8 @@ async def _run_simulation_pipeline(
                 is_production_resume = production_cpt.exists() and production_tpr.exists()
 
                 if not is_production_resume:
-                    write_md_mdp(workspace, compound_id, simulation_ns, temperature, pressure)
+                    write_md_mdp(workspace, compound_id, simulation_ns, temperature, pressure,
+                                 membrane=membrane)
                     await loop.run_in_executor(
                         None, run_subprocess,
                         ["gmx", "grompp", "-f", f"{compound_id}_md.mdp",
@@ -1217,7 +1097,7 @@ async def _run_simulation_pipeline(
 
                 progress_task = asyncio.create_task(_production_progress(
                     state, job_id, workspace / f"{compound_id}_md.log", simulation_ns,
-                    kind=system_kind(bool(pdb_content)),
+                    kind=rate_kind,
                 ))
                 production_started = time.monotonic()
                 try:
@@ -1235,7 +1115,7 @@ async def _run_simulation_pipeline(
                 # this host's measured rate, for later runtime estimates
                 ns_per_day = production_ns_per_day(workspace / f"{compound_id}_md.log")
                 if ns_per_day:
-                    await record_min_per_ns(state, system_kind(bool(pdb_content)), ns_per_day)
+                    await record_min_per_ns(state, rate_kind, ns_per_day)
 
                 _finalize_stage(workspace, "production", [f"{compound_id}_md.*"])
                 if checkpoint_callback:
@@ -1276,7 +1156,7 @@ async def _run_simulation_pipeline(
                     compound_id,
                     has_ligand=has_ligand,
                     top_file=top_file_name,
-                    route="run_covalent" if covalent_info else route,
+                    route="run_covalent" if covalent_info else ("run_membrane" if membrane else route),
                     simulation_ns=simulation_ns,
                     intent=intent,
                     has_protein=_has_protein_for_adequacy,
@@ -1322,6 +1202,8 @@ async def _run_simulation_pipeline(
                           if k in build_info} or None,
                 # The covalent complex: link, warhead rule, adduct residue
                 "covalent": covalent_info,
+                # Membrane systems: lipid, counts, box, OPM orientation
+                "membrane": build_info.get("membrane"),
             }
 
             # Upload to object storage
@@ -1333,7 +1215,8 @@ async def _run_simulation_pipeline(
                 result["output_location"] = output_location
 
             # this host's time outside production, for later runtime estimates
-            if production_seconds is not None and not completed_stages:
+            # (a membrane build and its staged equilibration would skew the soluble overhead)
+            if production_seconds is not None and not completed_stages and not membrane:
                 overhead = (time.monotonic() - started - production_seconds) / 60
                 await record_overhead_minutes(
                     state, overhead_kind(bool(pdb_content), has_ligand), overhead)

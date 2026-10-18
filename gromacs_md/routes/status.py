@@ -2,7 +2,7 @@
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -17,6 +17,18 @@ logger = logging.getLogger(__name__)
 ANALYSIS_MINUTES = 5
 
 router = APIRouter()
+
+
+def _utc(stamp):
+    """A stored timestamp (naive UTC, from datetime.utcnow()) with its zone
+    marked, so a client doesn't read it as its own local time."""
+    if not stamp:
+        return stamp
+    try:
+        t = datetime.fromisoformat(stamp)
+    except (TypeError, ValueError):
+        return stamp
+    return (t if t.tzinfo else t.replace(tzinfo=timezone.utc)).isoformat()
 
 
 @router.get("/status/{job_id}")
@@ -49,8 +61,10 @@ async def get_job_status(job_id: str, state: AppState = Depends(get_state)):
             "progress": progress.get("percentage", 0),
             "message": progress.get("message", ""),
             "step": progress.get("step", ""),
-            "last_updated": data.get("last_updated"),
+            "last_updated": _utc(data.get("last_updated")),
         }
+        if data.get("submitted_at"):
+            response["submitted_at"] = _utc(data["submitted_at"])
 
         # Terminal states (completed, refused) carry their full result
         # payload inline so clients that only poll /status/ still see
@@ -77,6 +91,11 @@ async def get_job_status(job_id: str, state: AppState = Depends(get_state)):
                     response["estimated_remaining_minutes"] = remaining
                     response["estimated_total_minutes"] = round(elapsed) + remaining if measured is not None else int(est_total)
                     response["elapsed_minutes"] = round(elapsed)
+                    # the finish time itself, in UTC: clients show it in the user's zone
+                    # rather than adding minutes to a clock they may have wrong
+                    response["estimated_completion_at"] = (
+                        datetime.now(timezone.utc) + timedelta(minutes=remaining)
+                    ).replace(microsecond=0).isoformat()
                     if progress.get("ns_per_day") is not None:
                         response["ns_per_day"] = progress["ns_per_day"]
                 except (ValueError, TypeError):

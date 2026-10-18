@@ -75,3 +75,28 @@ async def test_status_uses_the_measured_production_time(mock_state):
     assert out["estimated_remaining_minutes"] == 90 + status_route.ANALYSIS_MINUTES
     assert out["estimated_total_minutes"] == 60 + 90 + status_route.ANALYSIS_MINUTES
     assert out["ns_per_day"] == 96.0
+
+
+@pytest.mark.asyncio
+async def test_status_times_carry_their_zone(mock_state):
+    from datetime import datetime, timedelta, timezone
+    submitted = datetime.utcnow() - timedelta(minutes=60)
+    data = {
+        "status": "processing",
+        "submitted_at": submitted.isoformat(),
+        "last_updated": submitted.isoformat(),
+        "estimated_runtime_minutes": "100",
+        "progress": '{"percentage": 50, "message": "", "step": "production"}',
+    }
+
+    async def hgetall(key):
+        return data
+
+    mock_state.redis.hgetall = hgetall
+    out = await status_route.get_job_status("j", mock_state)
+    assert out["last_updated"].endswith("+00:00") and out["submitted_at"].endswith("+00:00")
+    finish = datetime.fromisoformat(out["estimated_completion_at"])
+    assert finish.utcoffset() == timedelta(0)
+    expected = datetime.now(timezone.utc) + timedelta(minutes=out["estimated_remaining_minutes"])
+    assert abs((finish - expected).total_seconds()) < 5
+    assert status_route._utc("not a time") == "not a time" and status_route._utc(None) is None

@@ -53,6 +53,7 @@ from .topology import (
 )
 from .analysis import analyze_trajectory
 from .amber_build import build_for_pipeline, load_build_info
+from .cofactor_build import cofactor_site, prepare_cofactors
 from .covalent_build import build_covalent_for_pipeline, covalent_site, fetch_ccd
 from intake.covalent import covalent_ligand_link_records
 from .membrane_build import (
@@ -339,6 +340,19 @@ async def _production_progress(
         await update_job_status(state, job_id, "processing", progress)
 
 
+async def _prepare_cofactors(state: AppState, job_id: str, workspace: Path, cofactors: Optional[Dict]):
+    """Parameters for the kept nucleotides (AM1-BCC) and the Mg2+ ions PDB, or None."""
+    if cofactors is None:
+        return None
+    names = ", ".join(n["code"] for n in cofactors["nucleotides"])
+    await update_job_status(state, job_id, "processing", {
+        "percentage": 6, "message": f"Parameterizing cofactors ({names} + Mg2+, AM1-BCC)",
+        "step": "cofactors",
+    })
+    return await asyncio.get_event_loop().run_in_executor(
+        None, prepare_cofactors, workspace, cofactors, cofactors["ccd"])
+
+
 async def _dock_starting_pose(state: AppState, job_id: str, workspace: Path, ligand_smiles: str,
                              pdb_content: str, native_site, ligand_pdb: Path) -> None:
     """Ligand starting pose, in the protein's frame: docked into the binding
@@ -517,6 +531,7 @@ async def _run_simulation_pipeline(
     skip_intake = "system_prep" in completed
     covalent: Optional[Dict] = None  # the covalent site, for route run_covalent
     membrane_site: Optional[Dict] = None  # OPM orientation, for route run_membrane
+    cofactors: Optional[Dict] = None  # kept nucleotide + Mg2+ sites, with their CCD entries
 
     # ------------------------------------------------------------------
     # Intake classification gate
@@ -601,6 +616,22 @@ async def _run_simulation_pipeline(
                 "step": "orient",
             })
 
+        if route in ("run_soluble", "run_covalent"):
+            # nucleotide-bound Mg2+ the classifier let through: kept with its
+            # nucleotide and shell waters, which only the tleap builder does
+            cofactors = cofactor_site(pdb_content)
+            if cofactors is not None:
+                try:
+                    cofactors["ccd"] = {n["code"]: await loop.run_in_executor(None, fetch_ccd, n["code"])
+                                        for n in cofactors["nucleotides"]}
+                except Exception as e:
+                    await fail_job(state, job_id, f"cofactors: {e}")
+                    return
+                builder = "tleap"
+                if ligand_smiles:  # dock away from the nucleotide pocket the cofactor fills
+                    native_site = native_ligand_site(
+                        pdb_content, ligand_smiles, exclude={n["code"] for n in cofactors["nucleotides"]})
+
         # Classifier approved. Next steps in order:
         #
         # 1. Rebuild missing sidechain atoms via PDBFixer. Crystal
@@ -617,8 +648,10 @@ async def _run_simulation_pipeline(
             "message": "Repairing missing sidechain atoms (PDBFixer)",
             "step": "repair",
         })
-        structure_notes += construct_notes(
-            pdb_content, ligand_smiles, simulated={covalent["ligand_code"]} if covalent else ())
+        simulated = {covalent["ligand_code"]} if covalent else set()
+        if cofactors:
+            simulated |= {n["code"] for n in cofactors["nucleotides"]} | {"MG"}
+        structure_notes += construct_notes(pdb_content, ligand_smiles, simulated=simulated)
         pdb_content, n_mse = convert_selenomethionine(pdb_content)
         if n_mse:
             structure_notes.append(f"{n_mse} selenomethionine (MSE) residues simulated as methionine")
@@ -716,9 +749,10 @@ async def _run_simulation_pipeline(
                                    f"{covalent['resnum']} + {covalent['ligand_code']}, AM1-BCC)",
                         "step": "covalent_adduct",
                     })
+                    cofactor_params = await _prepare_cofactors(state, job_id, workspace, cofactors)
                     gro_file, top_file, _ = await loop.run_in_executor(
                         None, build_covalent_for_pipeline, workspace, compound_id, pdb_content,
-                        covalent, covalent["ccd"],
+                        covalent, covalent["ccd"], cofactor_params,
                     )
 
                 elif membrane_site is not None:
@@ -747,13 +781,14 @@ async def _run_simulation_pipeline(
                                 state, job_id, workspace, ligand_smiles, pdb_content, native_site, ligand_pdb)
                         else:
                             await loop.run_in_executor(None, smiles_to_pdb, ligand_smiles, ligand_pdb)
+                    cofactor_params = await _prepare_cofactors(state, job_id, workspace, cofactors)
                     await update_job_status(state, job_id, "processing", {
                         "percentage": 8, "message": "Building the system with tleap (ff14SB)",
                         "step": "tleap",
                     })
                     gro_file, top_file, _ = await loop.run_in_executor(
                         None, build_for_pipeline, workspace, compound_id, pdb_content,
-                        ligand_pdb, ligand_smiles,
+                        ligand_pdb, ligand_smiles, cofactor_params,
                     )
 
                 elif pdb_content and ligand_smiles:
@@ -1204,6 +1239,8 @@ async def _run_simulation_pipeline(
                 "covalent": covalent_info,
                 # Membrane systems: lipid, counts, box, OPM orientation
                 "membrane": build_info.get("membrane"),
+                # Kept nucleotide + Mg2+ cofactors and their charges
+                "cofactors": build_info.get("cofactors"),
             }
 
             # Upload to object storage

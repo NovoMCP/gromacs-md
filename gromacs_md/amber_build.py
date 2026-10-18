@@ -39,6 +39,7 @@ _GMX_RESIDUE = {"WAT": "SOL", "Na+": "NA", "Cl-": "CL", "K+": "K"}
 _GMX_ATOM = {("WAT", "O"): "OW", ("WAT", "H1"): "HW1", ("WAT", "H2"): "HW2",
              ("Na+", "Na+"): "NA", ("Cl-", "Cl-"): "CL", ("K+", "K+"): "K"}
 SOLVENT_RESIDUES = {"SOL", "NA", "CL", "K"}
+COFACTOR_IONS_PDB = "cofactor_ions.pdb"
 
 # Single-point energy terms compared between sander and gmx, and the largest
 # difference accepted, relative to the term (kcal/mol floor for small terms).
@@ -180,7 +181,7 @@ def prepare_protein(pdb_text: str, gap_A: float = 2.0) -> PreparedProtein:
 def _tleap_script(protein_pdb: Optional[Path], disulfides: Sequence[Tuple[int, int]],
                   ligand: Optional[LigandParams], extra_leaprc: Sequence[str] = (),
                   ions: Optional[Tuple[int, int]] = None, out_prefix: Optional[str] = None,
-                  extra_params: Sequence[Path] = ()) -> str:
+                  extra_params: Sequence[Path] = (), cofactors=None) -> str:
     s = ["source leaprc.protein.ff14SB", "source leaprc.water.tip3p", "source leaprc.gaff2"]
     s += [f"source {rc}" for rc in extra_leaprc]
     # residue libraries and frcmods, e.g. a covalent adduct residue
@@ -193,6 +194,13 @@ def _tleap_script(protein_pdb: Optional[Path], disulfides: Sequence[Tuple[int, i
         s.append(f"prot = loadpdb {protein_pdb.name}")
         s += [f"bond prot.{i}.SG prot.{j}.SG" for i, j in disulfides]
         parts.append("prot")
+    if cofactors is not None:  # nucleotides, then Mg2+ and its shell waters
+        for k, p in enumerate(cofactors.nucleotides):
+            s.append(f"loadamberparams {p.frcmod.name}")
+            s.append(f"cof{k} = loadmol2 {p.mol2.name}")
+            parts.append(f"cof{k}")
+        s.append(f"cofions = loadpdb {COFACTOR_IONS_PDB}")
+        parts.append("cofions")
     if ligand is not None:
         parts.append("lig")
     s.append(f"sys = combine {{ {' '.join(parts)} }}")
@@ -255,7 +263,7 @@ def ion_counts(volume_A3: float, net_charge: float,
 
 def build_system(workspace: Path, compound_id: str, protein: Optional[PreparedProtein] = None,
                  ligand: Optional[LigandParams] = None,
-                 extra_params: Sequence[Path] = ()) -> Tuple[Path, Path, Dict]:
+                 extra_params: Sequence[Path] = (), cofactors=None) -> Tuple[Path, Path, Dict]:
     """Solvated, ionized AMBER system: prmtop and inpcrd, and build stats.
 
     tleap runs twice: the first build reads the box volume and net charge,
@@ -267,19 +275,24 @@ def build_system(workspace: Path, compound_id: str, protein: Optional[PreparedPr
     if protein is not None:
         protein_pdb = workspace / f"{compound_id}_protein_amber.pdb"
         protein_pdb.write_text(protein.pdb_text)
-    for p in ([ligand.mol2, ligand.frcmod] if ligand is not None else []) + list(extra_params):
+    files = ([ligand.mol2, ligand.frcmod] if ligand is not None else []) + list(extra_params)
+    if cofactors is not None:
+        files += [f for p in cofactors.nucleotides for f in (p.mol2, p.frcmod)]
+        (workspace / COFACTOR_IONS_PDB).write_text(cofactors.ions_pdb_text)
+    for p in files:
         if p.parent != workspace:
             shutil.copy(p, workspace / p.name)
 
     disulfides = protein.disulfides if protein else []
     log = _run_tleap(workspace, _tleap_script(protein_pdb, disulfides, ligand,
-                                              extra_params=extra_params), "leap_probe")
+                                              extra_params=extra_params, cofactors=cofactors), "leap_probe")
     volume, charge = _parse_volume_and_charge(log)
     n_na, n_cl = ion_counts(volume, charge)
 
     prefix = f"{compound_id}_amber"
     _run_tleap(workspace, _tleap_script(protein_pdb, disulfides, ligand, ions=(n_na, n_cl),
-                                        out_prefix=prefix, extra_params=extra_params), "leap_build")
+                                        out_prefix=prefix, extra_params=extra_params,
+                                        cofactors=cofactors), "leap_build")
     prmtop, inpcrd = workspace / f"{prefix}.prmtop", workspace / f"{prefix}.inpcrd"
     if not prmtop.exists() or prmtop.stat().st_size == 0:
         raise AmberBuildError("tleap wrote no prmtop")
@@ -453,11 +466,14 @@ def _ranges(indices: Sequence[int]) -> List[List[int]]:
 
 def write_build_groups(structure, path: Path, ligand_resnames: Sequence[str] = (),
                        n_protein_residues: int = 0,
-                       adduct: Optional[Tuple[str, Sequence[str]]] = None) -> Dict:
+                       adduct: Optional[Tuple[str, Sequence[str]]] = None,
+                       receptor_resnames: Sequence[str] = ()) -> Dict:
     """Protein and ligand atoms (1-based ranges), from what the build put
     where, so analysis doesn't classify atoms by residue name. `adduct` is
     (residue name, ligand atom names) for a ligand bonded into a protein
-    residue: those atoms go to the ligand, the residue's others to the protein."""
+    residue: those atoms go to the ligand, the residue's others to the protein.
+    Residues in `receptor_resnames` (kept cofactors such as GDP and Mg2+)
+    go with the protein."""
     protein, ligand = [], []
     for i, res in enumerate(structure.residues):
         if adduct is not None and res.name == adduct[0]:
@@ -465,7 +481,7 @@ def write_build_groups(structure, path: Path, ligand_resnames: Sequence[str] = (
                 (ligand if a.name in adduct[1] else protein).append(a.idx + 1)
             continue
         idx = [a.idx + 1 for a in res.atoms]
-        if i < n_protein_residues:
+        if i < n_protein_residues or res.name in receptor_resnames:
             protein += idx
         elif res.name in ligand_resnames:
             ligand += idx
@@ -516,7 +532,8 @@ def explicit_14_pairs(structure) -> int:
 
 def convert_to_gromacs(workspace: Path, compound_id: str, prmtop: Path, inpcrd: Path,
                        protein: Optional[PreparedProtein] = None,
-                       adduct: Optional[Tuple[str, Sequence[str]]] = None) -> Tuple[Path, Path, Dict]:
+                       adduct: Optional[Tuple[str, Sequence[str]]] = None,
+                       receptor_resnames: Sequence[str] = ()) -> Tuple[Path, Path, Dict]:
     """prmtop/inpcrd -> <cid>_solv_ions.gro and <cid>_amber.top (with
     POSRES blocks) and <cid>_build_groups.json."""
     import parmed
@@ -524,7 +541,8 @@ def convert_to_gromacs(workspace: Path, compound_id: str, prmtop: Path, inpcrd: 
     structure = parmed.load_file(str(prmtop), xyz=str(inpcrd))
     n_prot = len(protein.residue_ids) if protein else 0
     ligand_resnames = sorted({r.name for r in structure.residues[n_prot:]
-                              if r.name not in _GMX_RESIDUE and r.name not in LIPID_RESIDUES})
+                              if r.name not in _GMX_RESIDUE and r.name not in LIPID_RESIDUES
+                              and r.name not in receptor_resnames})
     _renumber(structure, protein)
     _gmx_names(structure)
 
@@ -537,7 +555,7 @@ def convert_to_gromacs(workspace: Path, compound_id: str, prmtop: Path, inpcrd: 
     structure.save(str(gro), format="gro", overwrite=True)
     apply_residue_numbers(structure, top, gro)
     groups = write_build_groups(structure, workspace / f"{compound_id}_build_groups.json",
-                                ligand_resnames, n_prot, adduct)
+                                ligand_resnames, n_prot, adduct, receptor_resnames)
     return gro, top, groups
 
 
@@ -735,7 +753,8 @@ def build_info_path(workspace: Path, compound_id: str) -> Path:
 
 
 def build_for_pipeline(workspace: Path, compound_id: str, protein_pdb_text: Optional[str],
-                       ligand_pdb: Optional[Path], ligand_smiles: Optional[str]) -> Tuple[Path, Path, Dict]:
+                       ligand_pdb: Optional[Path], ligand_smiles: Optional[str],
+                       cofactors=None) -> Tuple[Path, Path, Dict]:
     """system_prep for the tleap builder: the solvated, ionized system as
     <cid>_solv_ions.gro + <cid>_amber.top, energy-checked, and what the build
     did (also saved to <cid>_build_info.json for a resumed job's result)."""
@@ -749,19 +768,30 @@ def build_for_pipeline(workspace: Path, compound_id: str, protein_pdb_text: Opti
         base = compound_id.replace("-", "_")
         acpype_dir = workspace / f"{base}.acpype"
         ligand = LigandParams(acpype_dir / f"{base}_bcc_gaff2.mol2", acpype_dir / f"{base}_AC.frcmod")
-    prmtop, inpcrd, stats = build_system(workspace, compound_id, protein, ligand)
-    gro, top, groups = convert_to_gromacs(workspace, compound_id, prmtop, inpcrd, protein)
+    prmtop, inpcrd, stats = build_system(workspace, compound_id, protein, ligand, cofactors=cofactors)
+    gro, top, groups = convert_to_gromacs(workspace, compound_id, prmtop, inpcrd, protein,
+                                          receptor_resnames=cofactors.resnames if cofactors else ())
     parity = check_energy_parity(workspace, compound_id, prmtop, inpcrd, gro, top)
     info = {
         "builder": "tleap",
-        "force_field": FORCE_FIELD,
+        "force_field": force_field(cofactors),
         "ions": {"na": stats["na"], "cl": stats["cl"]},
         "disulfides": stats["disulfides"],
         "energy_parity": {t: v["diff"] for t, v in parity["terms"].items()},
         "notes": protein.notes if protein else [],
     }
+    if cofactors is not None:
+        info["cofactors"] = cofactors.info
     build_info_path(workspace, compound_id).write_text(json.dumps(info))
     return gro, top, info
+
+
+def force_field(cofactors=None, base: str = FORCE_FIELD) -> str:
+    """The force-field line for the result, naming the cofactors' parameters."""
+    if cofactors is None:
+        return base
+    from .cofactor_build import FORCE_FIELD_NOTE
+    return base.replace(", built with tleap", f"; {FORCE_FIELD_NOTE}, built with tleap")
 
 
 def load_build_info(workspace: Path, compound_id: str) -> Dict:

@@ -1826,6 +1826,11 @@ def _gro_atom_labels(gro_path: Path) -> Dict[int, str]:
 
 def _summarize_hbonds(frames: List[set], n_frames: int, labels: Dict[int, str],
                       ligand_atoms: set) -> Dict[str, Any]:
+    # A ligand bonded into a residue (a covalent adduct) can H-bond to that
+    # residue's own backbone: internal to the adduct, not a contact with the site
+    def residue(atom):
+        return labels.get(atom, str(atom)).split(":")[0]
+    frames = [{p for p in f if residue(p[0]) != residue(p[1])} for f in frames]
     counts = [len(f) for f in frames] + [0] * max(0, n_frames - len(frames))
     total = len(counts)
     if not total:

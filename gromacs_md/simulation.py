@@ -1260,6 +1260,10 @@ async def _run_simulation_pipeline(
                 "pressure": pressure,
                 "analysis": compact_analysis(analysis),
                 "output_files": ([full_analysis] if full_analysis else []) + [
+                    # tleap builds: what was built and the energy-parity record
+                    f.name for f in (workspace / f"{compound_id}_build_info.json",
+                                     workspace / f"{compound_id}_energy_parity.json") if f.exists()
+                ] + [
                     f"{compound_id}_md.xtc",
                     f"{compound_id}_md.gro",
                     f"{compound_id}_md.edr",

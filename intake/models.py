@@ -40,6 +40,7 @@ SuggestedBranch = Literal[
     "mcpb_distal",          # future: MCPB workflow for structural/distal metals
     "qmmm_active_site",     # future: QM/MM for catalytic metals
     "covalent_ligand",      # future: covalent-ligand parameterization
+    "modified_residues",    # future: parameters for PTMs (phosphorylation etc.)
 ]
 
 
@@ -100,7 +101,7 @@ class SystemProfile(BaseModel):
     hetatm_inventory: List[str] = Field(default_factory=list)   # other non-standard residues
     covalent_links: List[str] = Field(default_factory=list)     # ligand-protein LINK records
 
-    # PTMs (doc 04 scope — placeholder for v0, populated in later versions)
+    # Modified residues in the chain (MODRES), e.g. "TPO E197 phosphothreonine"
     ptm_residues: List[str] = Field(default_factory=list)
 
     # Parser + warnings

@@ -45,3 +45,19 @@ def test_gpu_queue_info_with_semaphore():
     info = get_gpu_queue_info(state)
     assert info["active_jobs"] == 1
     assert info["queue_available"] == 2
+
+
+def test_measured_overhead_replaces_the_default():
+    from gromacs_md.queue import estimate_runtime_minutes
+    # acetate on the GB10: ~0.6 min/ns production, ~1.4 min outside it
+    assert estimate_runtime_minutes(1, has_protein=False, has_ligand=True,
+                                    measured_min_per_ns=0.63, measured_overhead_minutes=1.4) == 3
+    assert estimate_runtime_minutes(1, has_protein=False, has_ligand=True,
+                                    measured_min_per_ns=0.63) == 7
+
+
+def test_overhead_kind():
+    from gromacs_md.queue import overhead_kind
+    assert overhead_kind(True, True) == "protein_ligand"
+    assert overhead_kind(True, False) == "protein"
+    assert overhead_kind(False, True) == "ligand"

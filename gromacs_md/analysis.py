@@ -1663,22 +1663,31 @@ def run_mmgbsa_analysis(
     return result
 
 
-def analyze_ligand_dynamics(workspace: Path, compound_id: str) -> Dict[str, Any]:
+def analyze_ligand_dynamics(workspace: Path, compound_id: str, has_protein: bool = True) -> Dict[str, Any]:
     """Ligand-specific trajectory analysis beyond the protein-wide RMSD.
 
     Adds three Theo-requested metrics:
       - ligand_rmsd: how far the ligand has moved from its starting pose,
         after fitting the protein (so drift in the pocket, not its change of shape)
       - hbond_persistence: fraction of frames each protein-ligand H-bond
-        was maintained. Theo's thresholds: >75% = "High Quality", <30% =
-        "False Positive"
+        was maintained (top bonds by atom). Theo's thresholds on the most
+        persistent bond: >75% = "High Quality", <30% = "False Positive"
       - pose_clusters: RMSD-based clustering of ligand poses (did the
         ligand stay in one binding mode or sample multiple?)
 
     Returns empty dict on failure — never raises. The per-metric try/except
     lets partial data come through when only some gmx calls succeed.
+
+    Without a protein (ligand-only run) there is no pocket to drift in and
+    nothing to H-bond to, so only the clustering runs: there it groups the
+    ligand's conformations.
     """
     out: Dict[str, Any] = {}
+    if not has_protein:
+        out["skipped"] = {
+            "ligand_rmsd": "ligand-only run: no protein to fit on (see rmsd, group 'ligand')",
+            "hbond_persistence": "ligand-only run: no protein to H-bond with",
+        }
 
     # Build index with Protein + Ligand (resname auto-detected)
     ndx_result = _make_mmgbsa_index(workspace, compound_id, f"{compound_id}_md.gro")
@@ -1698,6 +1707,10 @@ def analyze_ligand_dynamics(workspace: Path, compound_id: str) -> Dict[str, Any]
     prot_str = str(protein_group_idx)
 
     step_errors: List[str] = []
+    if not has_protein:
+        _cluster_ligand_poses(workspace, compound_id, ndx_path, lig_str, out, step_errors,
+                              what="conformer")
+        return _finish_ligand_dynamics(out, step_errors)
 
     # --- Ligand RMSD: the pose in the protein's frame ---
     # Fitting on the ligand itself would only measure its change of shape
@@ -1736,40 +1749,141 @@ def analyze_ligand_dynamics(workspace: Path, compound_id: str) -> Dict[str, Any]
 
     # --- H-bond persistence (protein ↔ ligand) ---
     try:
-        subprocess.run(
-            ["gmx", "hbond", "-s", f"{compound_id}_md.tpr", "-f", f"{compound_id}_md.xtc",
-             "-n", ndx_path.name,
-             "-num", f"{compound_id}_hbnum.xvg",
-             "-hbn", f"{compound_id}_hbond.ndx",
-             "-hbm", f"{compound_id}_hbmap.xpm"],
-            input=f"{prot_str}\n{lig_str}\n".encode(), check=True, cwd=workspace,
-            capture_output=True, timeout=300,
-        )
-        hb_rows = _parse_xvg(workspace / f"{compound_id}_hbnum.xvg")
-        if hb_rows:
-            counts = [r[1] for r in hb_rows if len(r) >= 2]
-            if counts:
-                mean_hbonds = sum(counts) / len(counts)
-                max_hbonds = max(counts)
-                # Fraction of frames with ≥1 H-bond = "any-contact persistence"
-                frames_with_hb = sum(1 for c in counts if c >= 1)
-                persistence_any = frames_with_hb / len(counts)
-                out["hbond_persistence"] = {
-                    "mean_count": round(mean_hbonds, 2),
-                    "max_count": int(max_hbonds),
-                    "any_contact_persistence": round(persistence_any, 3),
-                    "quality": (
-                        "High Quality" if persistence_any > 0.75
-                        else "False Positive Risk" if persistence_any < 0.30
-                        else "Moderate"
-                    ),
-                    "n_frames": len(counts),
-                }
+        hb = _hbond_persistence(workspace, compound_id, ndx_path, prot_str, lig_str)
+        if hb:
+            out["hbond_persistence"] = hb
     except Exception as e:
         logger.warning(f"H-bond analysis failed: {e}")
         step_errors.append(f"hbond: {str(e)[:200]}")
 
-    # --- Pose clustering (RMSD-based, ligand only) ---
+    _cluster_ligand_poses(workspace, compound_id, ndx_path, lig_str, out, step_errors)
+
+    return _finish_ligand_dynamics(out, step_errors)
+
+
+
+# Bonds listed in hbond_persistence, most persistent first
+HBOND_TOP_N = 8
+
+
+def _hbond_frames(ndx_text: str) -> List[set]:
+    """Per-frame sets of (donor, acceptor) atom numbers from `gmx hbond -pf -o`.
+
+    The index file has one [ hbonds_<ref>-<target>_frame_<n> ] section per
+    frame, each line "donor hydrogen acceptor"; a pair bonded through two
+    hydrogens counts once.
+    """
+    frames: Dict[int, set] = {}
+    current = None
+    for line in ndx_text.splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            m = re.match(r"\[\s*hbonds_.*_frame_(\d+)\s*\]", line)
+            current = frames.setdefault(int(m.group(1)), set()) if m else None
+        elif current is not None and line:
+            parts = line.split()
+            if len(parts) >= 3:
+                current.add((int(parts[0]), int(parts[2])))
+    return [frames[k] for k in sorted(frames)]
+
+
+def _gro_atom_labels(gro_path: Path) -> Dict[int, str]:
+    """1-based atom number -> "RES123:ATOM" from a .gro file."""
+    labels: Dict[int, str] = {}
+    lines = gro_path.read_text().splitlines()
+    for i, line in enumerate(lines[2:-1], start=1):
+        if len(line) >= 20:
+            labels[i] = f"{line[5:10].strip()}{line[0:5].strip()}:{line[10:15].strip()}"
+    return labels
+
+
+def _summarize_hbonds(frames: List[set], n_frames: int, labels: Dict[int, str],
+                      ligand_atoms: set) -> Dict[str, Any]:
+    counts = [len(f) for f in frames] + [0] * max(0, n_frames - len(frames))
+    total = len(counts)
+    if not total:
+        return {}
+    persistence_any = sum(1 for c in counts if c >= 1) / total
+    per_pair: Dict[tuple, int] = {}
+    for f in frames:
+        for pair in f:
+            per_pair[pair] = per_pair.get(pair, 0) + 1
+    bonds = []
+    for (donor, acceptor), n in sorted(per_pair.items(), key=lambda kv: -kv[1])[:HBOND_TOP_N]:
+        ligand_donates = donor in ligand_atoms
+        protein_atom, ligand_atom = (acceptor, donor) if ligand_donates else (donor, acceptor)
+        bonds.append({
+            "protein_atom": labels.get(protein_atom, str(protein_atom)),
+            "ligand_atom": labels.get(ligand_atom, str(ligand_atom)),
+            "donor": "ligand" if ligand_donates else "protein",
+            "persistence": round(n / total, 3),
+        })
+    top = bonds[0]["persistence"] if bonds else 0.0
+    return {
+        "mean_count": round(sum(counts) / total, 2),
+        "max_count": max(counts),
+        "any_contact_persistence": round(persistence_any, 3),
+        "max_bond_persistence": top,
+        "bonds": bonds,
+        # graded on the most persistent single bond: "at least one H-bond in the
+        # frame" is easy to satisfy with bonds that come and go
+        "quality": (
+            "High Quality" if top > 0.75
+            else "False Positive Risk" if top < 0.30
+            else "Moderate"
+        ),
+        "n_frames": total,
+    }
+
+
+def _hbond_persistence(workspace: Path, compound_id: str, ndx_path: Path,
+                       prot_str: str, lig_str: str) -> Dict[str, Any]:
+    """Protein-ligand H-bonds per frame with GROMACS >= 2024 `gmx hbond`."""
+    ndx_out = workspace / f"{compound_id}_hbond.ndx"
+    proc = subprocess.run(
+        ["gmx", "hbond", "-s", f"{compound_id}_md.tpr", "-f", f"{compound_id}_md.xtc",
+         "-n", ndx_path.name, "-r", f"group {prot_str}", "-t", f"group {lig_str}",
+         "-num", f"{compound_id}_hbnum.xvg", "-o", ndx_out.name, "-pf", "-tu", "ns"],
+        cwd=workspace, capture_output=True, timeout=600,
+    )
+    log = (proc.stdout + proc.stderr).decode(errors="replace")
+    if proc.returncode != 0:
+        if re.search(r"has 0 acceptors and 0 donors", log):
+            return {
+                "mean_count": 0, "max_count": 0, "any_contact_persistence": 0.0,
+                "max_bond_persistence": 0.0, "bonds": [],
+                "quality": "Not applicable",
+                "note": "the ligand has no H-bond donors or acceptors",
+            }
+        raise RuntimeError(log.strip().splitlines()[-1] if log.strip() else f"exit {proc.returncode}")
+    n_frames = len(_parse_xvg(workspace / f"{compound_id}_hbnum.xvg"))
+    frames = _hbond_frames(ndx_out.read_text())
+    ligand_atoms = _index_group_atoms(ndx_path, int(lig_str))
+    labels = _gro_atom_labels(workspace / f"{compound_id}_md.gro")
+    return _summarize_hbonds(frames, n_frames, labels, ligand_atoms)
+
+
+def _index_group_atoms(ndx_path: Path, group: int) -> set:
+    """Atom numbers of the group-th [ section ] of an index file."""
+    atoms, n = set(), -1
+    for line in ndx_path.read_text().splitlines():
+        if line.strip().startswith("["):
+            n += 1
+        elif n == group:
+            atoms.update(int(x) for x in line.split())
+    return atoms
+
+def _finish_ligand_dynamics(out: Dict[str, Any], step_errors: List[str]) -> Dict[str, Any]:
+    if not [k for k in out if k != "skipped"] and step_errors:
+        return {"error": "; ".join(step_errors)}
+    if step_errors:
+        out["step_errors"] = step_errors
+    return out
+
+
+def _cluster_ligand_poses(workspace: Path, compound_id: str, ndx_path: Path, lig_str: str,
+                          out: Dict[str, Any], step_errors: List[str], what: str = "pose") -> None:
+    """GROMOS clustering of the ligand (fit on itself) into out["pose_clusters"]."""
     try:
         subprocess.run(
             ["gmx", "cluster", "-s", f"{compound_id}_md.tpr", "-f", f"{compound_id}_md.xtc",
@@ -1799,15 +1913,11 @@ def analyze_ligand_dynamics(workspace: Path, compound_id: str) -> Dict[str, Any]
                     "clusters": clusters[:5],  # Top 5
                     "stable_pose": clusters[0]["population_pct"] > 70 if clusters else False,
                 }
+                if what != "pose":
+                    out["pose_clusters"]["clusters_of"] = f"ligand {what}s (no protein in the system)"
     except Exception as e:
         logger.warning(f"Pose clustering failed: {e}")
         step_errors.append(f"cluster: {str(e)[:200]}")
-
-    if not out and step_errors:
-        return {"error": "; ".join(step_errors)}
-    if step_errors:
-        out["step_errors"] = step_errors
-    return out
 
 
 def analyze_trajectory(
@@ -1982,7 +2092,8 @@ def analyze_trajectory(
         if has_ligand:
             # Ligand RMSD, H-bond persistence, pose clustering (safe for membrane too)
             try:
-                ligand_dynamics = analyze_ligand_dynamics(workspace, compound_id)
+                ligand_dynamics = analyze_ligand_dynamics(workspace, compound_id,
+                                                          has_protein=_has_protein)
                 if ligand_dynamics:
                     analysis["ligand_dynamics"] = ligand_dynamics
             except Exception as e:
@@ -2014,8 +2125,9 @@ def analyze_trajectory(
                     "skipped": True,
                     "reason": (
                         "Ligand-only simulation — MM-GBSA requires a protein-ligand "
-                        "complex to compute binding free energy. Use the ligand RMSD "
-                        "and pose clustering metrics for stability assessment."
+                        "complex to compute binding free energy. The ligand's RMSD "
+                        "(rmsd, group 'ligand') and conformer clusters describe its "
+                        "behaviour in water, not binding."
                     ),
                 }
 

@@ -14,7 +14,10 @@ from ..models import MDSimulationRequest, LigandPreparationRequest, BatchMDReque
 from ..ligand_input import LigandInputError, prepare_ligand_smiles
 from ..analysis import _KNOWN_INTENTS as KNOWN_INTENTS
 from ..pdb_handling import fetch_pdb_from_rcsb
-from ..queue import estimate_runtime_minutes, get_gpu_queue_info, measured_min_per_ns, system_kind
+from ..queue import (
+    estimate_runtime_minutes, get_gpu_queue_info, measured_min_per_ns, measured_overhead_minutes,
+    overhead_kind, system_kind,
+)
 from ..redis_jobs import update_job_status
 
 logger = logging.getLogger(__name__)
@@ -110,6 +113,8 @@ async def submit_simulation(request: MDSimulationRequest, state: AppState = Depe
         has_ligand=has_ligand,
         concurrent_jobs=gpu_info["active_jobs"],
         measured_min_per_ns=await measured_min_per_ns(state, system_kind(has_protein)),
+        measured_overhead_minutes=await measured_overhead_minutes(
+            state, overhead_kind(has_protein, has_ligand)),
     )
 
     # Initialize job in Redis FIRST — before any slow I/O
@@ -168,6 +173,8 @@ async def simulate_ligand(request: LigandPreparationRequest, state: AppState = D
         has_protein=False,
         has_ligand=True,
         concurrent_jobs=gpu_info["active_jobs"],
+        measured_min_per_ns=await measured_min_per_ns(state, system_kind(False)),
+        measured_overhead_minutes=await measured_overhead_minutes(state, overhead_kind(False, True)),
     )
 
     await update_job_status(state, job_id, "queued", {

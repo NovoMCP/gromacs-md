@@ -74,3 +74,26 @@ def test_acpype_is_given_the_smiles_net_charge(tmp_path, monkeypatch):
     topology.generate_ligand_topology(tmp_path, "x", tmp_path / "lig.pdb", "NC(=[NH2+])c1ccccc1")
     acpype = next(c for c in calls if c[0] == "acpype")
     assert acpype[acpype.index("-n") + 1] == "1"
+
+
+@pytest.mark.parametrize("line,number", [
+    (" oh       oh          0.00000  0.00000   A     3.24287e-01   3.89112e-01 ; 1.82  0.0930\n", 8),
+    (" c3       c3          0.00000  0.00000   A     3.39771e-01   4.51035e-01 ; 1.91  0.1078\n", 6),
+    (" cl       cl          0.00000  0.00000   A     3.46595e-01   1.10374e+00 ; 1.95  0.2638\n", 17),
+    (" n8       n8          0.00000  0.00000   A     3.65019e-01   1.35143e-01 ; 2.05  0.0323\n", 7),
+    (" hn       hn          0.00000  0.00000   A     1.10650e-01   4.18400e-02 ; 0.62  0.0100\n", 1),
+])
+def test_ligand_atomtypes_get_their_element(line, number):
+    out = topology.with_atomic_number(line)
+    fields = out.split(";")[0].split()
+    assert len(fields) == 8 and fields[2] == str(number)
+    assert fields[0] == fields[1] == line.split()[0]
+    assert fields[3:] == line.split(";")[0].split()[2:]
+    assert out.endswith("\n") and ";" in out
+
+
+def test_atomtype_lines_that_are_not_acpype_format_are_kept():
+    header = ";name   bond_type     mass     charge   ptype   sigma         epsilon       Amb\n"
+    already = " c3   c3   6   12.01  0.0  A  3.4e-01  4.5e-01\n"
+    assert topology.with_atomic_number(header) == header
+    assert topology.with_atomic_number(already) == already

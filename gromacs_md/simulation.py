@@ -21,6 +21,7 @@ from .s3_storage import upload_results_to_blob
 from .subprocess_utils import run_subprocess, load_mdrun_retries, without_nsteps, is_cancelled, forget_cancelled
 from .ligand_input import LigandInputError, prepare_ligand_smiles
 from .queue import record_min_per_ns, system_kind
+from .result_compact import compact_analysis, write_full_analysis
 from .placement import native_ligand_site, place_ligand, save_placement, load_placement
 from .pdb_handling import (
     clean_pdb_protein_only,
@@ -433,13 +434,15 @@ async def _run_membrane_pipeline(
                 }
 
                 # 9. Upload results
+                full_analysis = write_full_analysis(workspace, compound_id, analysis)
                 result = {
                     "compound_id": compound_id,
                     "simulation_ns": simulation_ns,
                     "temperature": temperature,
                     "pipeline": "membrane",
                     "force_field": "charmm36m",
-                    "analysis": analysis,
+                    "analysis": compact_analysis(analysis),
+                    "output_files": [full_analysis] if full_analysis else [],
                 }
 
                 blob_url = await upload_results_to_blob(state, workspace, job_id, result)
@@ -1193,6 +1196,8 @@ async def _run_simulation_pipeline(
                 ),
             )
 
+            # Time series are thinned in the result; the full ones stay on disk
+            full_analysis = write_full_analysis(workspace, compound_id, analysis)
             result = {
                 "job_id": job_id,
                 "compound_id": compound_id,
@@ -1200,8 +1205,8 @@ async def _run_simulation_pipeline(
                 "simulation_ns": simulation_ns,
                 "temperature": temperature,
                 "pressure": pressure,
-                "analysis": analysis,
-                "output_files": [
+                "analysis": compact_analysis(analysis),
+                "output_files": ([full_analysis] if full_analysis else []) + [
                     f"{compound_id}_md.xtc",
                     f"{compound_id}_md.gro",
                     f"{compound_id}_md.edr",

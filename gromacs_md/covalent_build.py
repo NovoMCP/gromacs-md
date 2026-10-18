@@ -401,7 +401,7 @@ def fetch_ccd(code: str, timeout: float = 30.0) -> str:
 
 
 def build_covalent_for_pipeline(workspace: Path, compound_id: str, protein_pdb_text: str,
-                                site: Dict, ccd_cif: str) -> Tuple[Path, Path, Dict]:
+                                site: Dict, ccd_cif: str, cofactors=None) -> Tuple[Path, Path, Dict]:
     """system_prep for a covalent complex: the adduct residue, the tleap
     system around it (ff14SB + GAFF2 + TIP3P), energy-checked, and what was
     done (saved as <cid>_build_info.json like the plain tleap build)."""
@@ -413,16 +413,18 @@ def build_covalent_for_pipeline(workspace: Path, compound_id: str, protein_pdb_t
     protein = substitute_adduct(protein, site["chain"], site["resnum"], adduct)
     n_junction = junction_parameters(workspace, protein.pdb_text, protein.disulfides, adduct)
     extra = [adduct.lib] + adduct.frcmods
-    prmtop, inpcrd, stats = ab.build_system(workspace, compound_id, protein, None, extra_params=extra)
+    prmtop, inpcrd, stats = ab.build_system(workspace, compound_id, protein, None, extra_params=extra,
+                                            cofactors=cofactors)
     gro, top, groups = ab.convert_to_gromacs(workspace, compound_id, prmtop, inpcrd, protein,
-                                             adduct=(RESNAME, adduct.ligand_atoms))
+                                             adduct=(RESNAME, adduct.ligand_atoms),
+                                             receptor_resnames=cofactors.resnames if cofactors else ())
     parity = ab.check_energy_parity(workspace, compound_id, prmtop, inpcrd, gro, top)
 
     # atom numbers (1-based) of the bond, to report its length over the trajectory
     bond = _bond_atom_numbers(gro, adduct.bond_atom)
     info = {
         "builder": "tleap",
-        "force_field": ab.FORCE_FIELD,
+        "force_field": ab.force_field(cofactors),
         "ions": {"na": stats["na"], "cl": stats["cl"]},
         "disulfides": stats["disulfides"],
         "energy_parity": {t: v["diff"] for t, v in parity["terms"].items()},
@@ -437,6 +439,8 @@ def build_covalent_for_pipeline(workspace: Path, compound_id: str, protein_pdb_t
             "bond_atoms": bond,
         },
     }
+    if cofactors is not None:
+        info["cofactors"] = cofactors.info
     ab.build_info_path(workspace, compound_id).write_text(json.dumps(info))
     return gro, top, info
 

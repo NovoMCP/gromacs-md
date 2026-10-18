@@ -100,7 +100,25 @@ A protein OPM lists as a membrane protein routes to `run_membrane`
 
 Proteins without a PDB ID (uploads) aren't detected as membrane proteins yet.
 
-tleap is the path for systems pdb2gmx can't build (lipids, covalent adducts).
+### Nucleotide-bound Mg2+ (`cofactor_build.py`)
+
+Most metals still refuse. The exception is a Mg2+ whose shell is all oxygen
+and holds one nucleotide phosphate: GTPases and kinases with GDP, GTP, ADP,
+ATP or their analogues (6OIM's KRAS G12C with GDP). Stripping these leaves
+the nucleotide pocket empty and the switch regions free to collapse, so the
+soluble and covalent routes keep them, and the build switches to tleap:
+
+- the nucleotide is built on its crystal heavy atoms with its CCD entry's
+  bonds, with the phosphate hydroxyls deprotonated (GDP3-, GTP4-), and
+  parameterized with GAFF2 and AM1-BCC charges;
+- Mg2+ is a nonbonded ion with the Li/Merz 12-6 TIP3P parameters, and the
+  crystal waters in its shell are kept so it starts fully coordinated.
+
+Both count as receptor in the analysis groups, and the result lists them
+under `cofactors`. The intake reasons say which sites were kept.
+
+tleap is the path for systems pdb2gmx can't build (lipids, covalent adducts,
+nucleotide and Mg2+ cofactors).
 Results from the two builders use different protein force fields and aren't
 strictly comparable; each result states `force_field` and `builder`.
 

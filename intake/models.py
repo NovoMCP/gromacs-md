@@ -101,6 +101,8 @@ class SystemProfile(BaseModel):
     fes_clusters: Dict[str, int] = Field(default_factory=dict)  # {"SF4": 2}
     hetatm_inventory: List[str] = Field(default_factory=list)   # other non-standard residues
     covalent_links: List[str] = Field(default_factory=list)     # ligand-protein LINK records
+    # nucleotide-bound Mg2+ sites MD keeps, e.g. "MG A301 with GDP A302"
+    kept_cofactors: List[str] = Field(default_factory=list)
 
     # Modified residues in the chain (MODRES), e.g. "TPO E197 phosphothreonine"
     ptm_residues: List[str] = Field(default_factory=list)

@@ -22,6 +22,7 @@ import httpx
 from . import metalpdb as mpdb
 from . import opm
 from . import parser
+from .cofactors import magnesium_sites
 from .covalent import covalent_branch_refusal, covalent_ligand_link_records
 from .heuristics import classify_by_donors
 from .modified_residues import unsupported_modified_residues
@@ -180,6 +181,9 @@ async def classify_structure(
     consumed: set = set()
     has_catalytic = False
     has_structural_or_unknown = False
+    # Mg2+ on a nucleotide phosphate with an all-oxygen shell is simulated as a cofactor
+    kept_mg = {(s.chain, int(s.resseq)): s for s in magnesium_sites(pdb_content)
+               if s.supported and s.resseq.lstrip("-").isdigit()}
 
     for shell in parsed.metal_shells:
         ann = mpdb.match_annotation(
@@ -224,6 +228,15 @@ async def classify_structure(
             if shell.metal_chain
             else f"{shell.metal_element}@{shell.metal_resid}"
         )
+        kept = kept_mg.get((shell.metal_chain, shell.metal_resid)) if shell.metal_element == "MG" else None
+        if kept is not None:
+            res, chain, seq = kept.nucleotide
+            profile.kept_cofactors.append(f"{kept.label()} with {res} {chain}{seq}")
+            reasons.append(
+                f"metal {label}: nucleotide-bound Mg2+ with {res}, kept as a cofactor "
+                f"(Mg2+ as a nonbonded 12-6 ion with its {len(kept.waters)} crystal waters, "
+                f"{res} with GAFF2 AM1-BCC charges)")
+            continue
         reasons.append(f"metal {label}: {role} ({reason})")
 
         if role == "catalytic":

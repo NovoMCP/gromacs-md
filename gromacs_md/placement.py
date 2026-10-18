@@ -62,16 +62,18 @@ def _heavy_atoms(smiles: Optional[str]) -> Optional[int]:
     return mol.GetNumHeavyAtoms() if mol is not None else None
 
 
-def native_ligand_site(pdb_content: str, ligand_smiles: Optional[str] = None) -> Optional[dict]:
+def native_ligand_site(pdb_content: str, ligand_smiles: Optional[str] = None,
+                       exclude=()) -> Optional[dict]:
     """The co-crystallized ligand's site: the non-additive HETATM residue
     closest in heavy-atom count to the submitted ligand (the largest one
-    without a SMILES). Call before HETATM records are stripped."""
+    without a SMILES), other than residues named in `exclude` (cofactors
+    kept in the simulation). Call before HETATM records are stripped."""
     residues: dict = {}
     for line in pdb_content.splitlines():
         if not line.startswith("HETATM") or len(line) < 54:
             continue
         resname = line[17:20].strip()
-        if resname in _NON_LIGAND_HETATMS:
+        if resname in _NON_LIGAND_HETATMS or resname in exclude:
             continue
         element = (line[76:78].strip() if len(line) >= 78 else "") or line[12:16].strip()[:1]
         if element.upper() == "H":

@@ -6,7 +6,10 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
+
+from intake import classifier, opm
 
 from ..state import AppState, get_state
 from ..auth import validate_api_key
@@ -16,13 +19,35 @@ from ..analysis import _KNOWN_INTENTS as KNOWN_INTENTS
 from ..pdb_handling import fetch_pdb_from_rcsb
 from ..queue import (
     estimate_runtime_minutes, get_gpu_queue_info, measured_min_per_ns, measured_overhead_minutes,
-    overhead_kind, system_kind,
+    membrane_runtime_minutes, overhead_kind, system_kind,
 )
 from ..redis_jobs import update_job_status
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# how long submission waits on OPM to learn whether the system needs a membrane
+MEMBRANE_CHECK_TIMEOUT_S = 5.0
+
+
+async def _runs_in_membrane(state: AppState, pdb_id: Optional[str]) -> bool:
+    """Whether intake will route this PDB to the membrane branch, so the
+    estimate returned at submission is the right one (a POPC system runs
+    several times slower). The answer is cached in Redis, so the pipeline's
+    own classification doesn't ask OPM again. False on any doubt: the
+    pipeline revises the estimate once it has classified the structure."""
+    if not pdb_id or not classifier.MEMBRANE_BRANCH_ENABLED:
+        return False
+    try:
+        async with httpx.AsyncClient() as client:
+            is_membrane, _, _ = await asyncio.wait_for(
+                opm.check_membrane(pdb_id, http_client=client, redis_client=state.redis),
+                MEMBRANE_CHECK_TIMEOUT_S)
+        return is_membrane
+    except Exception as e:
+        logger.info(f"membrane check at submission skipped for {pdb_id}: {e!r}")
+        return False
 
 
 from ..simulation import run_simulation_pipeline
@@ -122,6 +147,10 @@ async def submit_simulation(request: MDSimulationRequest, state: AppState = Depe
         measured_overhead_minutes=await measured_overhead_minutes(
             state, overhead_kind(has_protein, has_ligand)),
     )
+    if await _runs_in_membrane(state, request.pdb_id):
+        est_minutes = membrane_runtime_minutes(
+            request.simulation_ns, await measured_min_per_ns(state, "membrane"),
+            await measured_min_per_ns(state, "protein"))
 
     # Initialize job in Redis FIRST — before any slow I/O
     # Store estimate + submitted_at so status endpoint can compute remaining time

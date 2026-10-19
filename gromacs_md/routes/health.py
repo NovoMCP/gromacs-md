@@ -1,6 +1,6 @@
 """GET /health — service liveness and dependency checks."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends
 
@@ -26,7 +26,7 @@ async def health_check(state: AppState = Depends(get_state)):
         "status": "healthy",
         "service": "gromacs-md",
         "version": "3.0.0",
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "gpu_available": check_gpu_available(),
         "gromacs_version": get_gromacs_version(),
         "redis_connected": redis_ok,
